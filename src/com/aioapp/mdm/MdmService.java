@@ -2266,6 +2266,12 @@ public class MdmService extends Service {
             extra.put("charger_voltage_mv", extractChargerVoltage(batteryIntent));
             extra.put("charger_type", extractChargerType(batteryIntent));
         }
+        // Screen on/off. The service already reads this to pace its polling; reporting it
+        // lets the server separate "powered and in use" from "powered and idle", which is
+        // the difference between a device working a shift and one sitting on a shelf.
+        // A boolean per sample is enough because the server weights every sample by the
+        // gap to the next one, so a slower idle cadence does not skew the totals.
+        extra.put("screen_on", isScreenOn());
         // Wi-Fi stability: disconnects observed in the last hour (WifiStateTracker).
         extra.put("wifi_disconnects_1h", getWifiDisconnects1h());
         // System health: reboot reason + per-boot id (changes every reboot → the server
@@ -2325,7 +2331,7 @@ public class MdmService extends Service {
     // value via merge). Volatile keys are always included in any frame we do send.
     private static final String[] GATED_EXTRA_KEYS = {
             "charging", "storage_free_gb", "wlc_status", "wifi", "ip_address",
-            "timezone", "boot_reason", "charger_type", "boot_id"
+            "timezone", "boot_reason", "charger_type", "boot_id", "screen_on"
     };
     private static final String[] VOLATILE_EXTRA_KEYS = {
             "battery_temp_c", "ram_usage_mb", "uptime_seconds", "wifi_rssi", "ota_progress",
@@ -2961,6 +2967,17 @@ public class MdmService extends Service {
             crc.update(pkg.getBytes(StandardCharsets.UTF_8));
         }
         return Long.toHexString(crc.getValue());
+    }
+
+    /**
+     * Whether the display is on right now. PowerManager.isInteractive() is the same signal
+     * getAdaptivePollInterval() uses to slow polling down when nobody is watching; here it
+     * is reported so the server can measure standby time. Returns true when PowerManager is
+     * unavailable, matching the polling code: assume in use rather than invent idle time.
+     */
+    private boolean isScreenOn() {
+        PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+        return pm == null || pm.isInteractive();
     }
 
     private long getAdaptivePollInterval() {
