@@ -2266,6 +2266,17 @@ public class MdmService extends Service {
             extra.put("charger_voltage_mv", extractChargerVoltage(batteryIntent));
             extra.put("charger_type", extractChargerType(batteryIntent));
         }
+        // Whether the pack is actually there, on a product that is supposed to have one.
+        // The T7's charger IC infers presence from the NTC (thermistor) fault bits rather
+        // than a presence pin -- see sgm4154x_charger.c POWER_SUPPLY_PROP_PRESENT -- so an
+        // open or out-of-range thermistor, or a pack left unplugged on the bench, reports
+        // "no battery" AND suspends charging. The level keeps reading whatever the fuel
+        // gauge sees on the rail (e.g. 96%), so without this flag the server shows a
+        // healthy-looking percentage for a device that is not on battery power at all.
+        if (product.hasBattery() && batteryIntent != null) {
+            extra.put("battery_present",
+                    batteryIntent.getBooleanExtra(BatteryManager.EXTRA_PRESENT, true));
+        }
         // Screen on/off. The service already reads this to pace its polling; reporting it
         // lets the server separate "powered and in use" from "powered and idle", which is
         // the difference between a device working a shift and one sitting on a shelf.
