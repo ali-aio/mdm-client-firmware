@@ -160,6 +160,20 @@ public class MdmService extends Service {
     private long ramLastMs = 0;
     private static final long RAM_CACHE_MS = 30_000;
 
+    // Reported (not raw) values for the readings that never sit still. The sensors jitter
+    // in their last digit — board temperature by tenths of a degree, charger voltage by a
+    // few mV — and every wobble used to travel as a fresh value and land as a stored
+    // history row. These hold what was last reported and only move once the reading has
+    // genuinely moved by the step below, so a value parked on a boundary cannot flap.
+    // Deliberately a deadband against the last REPORTED value rather than rounding to a
+    // grid: rounding still flips every time the reading crosses a grid line.
+    private float reportedTempC = SENTINEL_TEMP_C;
+    private int reportedChargerMv = -1;
+    private static final float SENTINEL_TEMP_C = -999f;
+    private static final float TEMP_STEP_C = 1.0f;      // whole degrees is all any chart shows
+    private static final int CHARGER_STEP_MV = 50;      // the pack's own range spans ~45 mV
+    private final Object quantLock = new Object();      // guards the two reported values above
+
     private int cachedWlcStatus = -1;
     private long wlcLastMs = 0;
     private static final long WLC_CACHE_MS = 120_000;
@@ -2433,9 +2447,19 @@ public class MdmService extends Service {
     }
 
     private float extractBatteryTemperature(Intent batteryStatus) {
-        if (batteryStatus == null) return -999;
+        if (batteryStatus == null) return SENTINEL_TEMP_C;
         int tenths = batteryStatus.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0);
-        return tenths / 10.0f;
+        float raw = tenths / 10.0f;
+        synchronized (quantLock) {
+            // Hold the real reading, don't snap it to a grid: the dashboard still shows a
+            // true 31.4 °C, it just stops changing until the board has actually moved a
+            // degree. Snapping would also re-introduce the boundary flapping this exists
+            // to remove.
+            if (reportedTempC == SENTINEL_TEMP_C || Math.abs(raw - reportedTempC) >= TEMP_STEP_C) {
+                reportedTempC = raw;
+            }
+            return reportedTempC;
+        }
     }
 
     private boolean extractCharging(Intent batteryStatus) {
@@ -2451,7 +2475,14 @@ public class MdmService extends Service {
      *  5V (~5000 mV) supply distinguishes a basic charger from a higher-voltage fast charger. */
     private int extractChargerVoltage(Intent batteryStatus) {
         if (batteryStatus == null) return -1;
-        return batteryStatus.getIntExtra(BatteryManager.EXTRA_VOLTAGE, -1);
+        int raw = batteryStatus.getIntExtra(BatteryManager.EXTRA_VOLTAGE, -1);
+        if (raw < 0) return -1;
+        synchronized (quantLock) {
+            if (reportedChargerMv < 0 || Math.abs(raw - reportedChargerMv) >= CHARGER_STEP_MV) {
+                reportedChargerMv = Math.round(raw / (float) CHARGER_STEP_MV) * CHARGER_STEP_MV;
+            }
+            return reportedChargerMv;
+        }
     }
 
     /** Plug type: none | ac | usb | wireless | unknown (from BatteryManager.EXTRA_PLUGGED). */
