@@ -2305,6 +2305,13 @@ public class MdmService extends Service {
                 SystemPropertiesProxy.get("ro.boot.bootreason", "")));
         extra.put("boot_id", getBootId());
         extra.put("crash_events", getRecentCrashEvents());
+        // Security posture (adb, developer options, unknown sources, root, accessibility
+        // services, Play Protect): the compliance rules' shared vocabulary across agents.
+        try {
+            SecurityPosture.put(MdmService.this, extra);
+        } catch (Throwable t) {
+            Log.w(TAG, "security posture failed: " + t.getMessage());
+        }
         // Include OTA progress if an update is in progress. Snapshot otaCommandId once: the OTA
         // listener nulls it on a binder callback thread, so re-reading the field after the
         // null-check could NPE at the put() below.
@@ -2356,7 +2363,11 @@ public class MdmService extends Service {
     // value via merge). Volatile keys are always included in any frame we do send.
     private static final String[] GATED_EXTRA_KEYS = {
             "charging", "storage_free_gb", "wlc_status", "wifi", "ip_address",
-            "timezone", "boot_reason", "charger_type", "boot_id", "screen_on"
+            "timezone", "boot_reason", "charger_type", "boot_id", "screen_on",
+            // Posture: a change (adb switched on, a new accessibility service) is sent at
+            // once rather than waiting for the next keyframe.
+            "adb_enabled", "adb_tcp", "dev_options_enabled", "unknown_sources",
+            "unknown_source_apps", "su_present", "accessibility_services", "play_protect"
     };
     private static final String[] VOLATILE_EXTRA_KEYS = {
             "battery_temp_c", "ram_usage_mb", "uptime_seconds", "wifi_rssi", "ota_progress",
