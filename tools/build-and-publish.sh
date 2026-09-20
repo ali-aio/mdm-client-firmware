@@ -82,7 +82,8 @@ SLOT="firmware-release-keys"
 [ "$VARIANT" = "userdebug" ] && SLOT="firmware-test-keys"
 
 echo "→ publishing to $SERVER (slot $SLOT)"
-curl -fsS -X POST "$SERVER/api/v1/agent-apk?slot=$SLOT&name=mdm-client.apk" \
+CHANGELOG=$(git -C "$(dirname "$0")/.." log -1 --pretty=%s 2>/dev/null | python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.stdin.read().strip()))' || true)
+curl -fsS -X POST "$SERVER/api/v1/agent-apk?slot=$SLOT&name=mdm-client.apk&changelog=$CHANGELOG" \
   -H "X-API-Key: $KEY" \
   -H "Content-Type: application/vnd.android.package-archive" \
   --data-binary "@$APK"
