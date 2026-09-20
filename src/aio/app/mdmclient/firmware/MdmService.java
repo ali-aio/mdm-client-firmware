@@ -284,6 +284,11 @@ public class MdmService extends Service {
         startForeground(NOTIFICATION_ID, buildNotification("Your device is set up and protected"));
         ensureDeviceOwner();
 
+        // A self-update the previous build started: this one reports how it went. Queued on
+        // the executor because the ack may have to go over HTTP before the socket is up.
+        executor.execute(() -> ClientUpdater.settlePending(this,
+                (cmdId, status, output) -> reportTerminal(cmdId, getDeviceSerial(), status, output)));
+
         // Product (resolved once at field init) gates the receiver registrations below and
         // the telemetry collectors via its capabilities.
         Log.i(TAG, "Device product=" + product.key()
@@ -1263,6 +1268,25 @@ public class MdmService extends Service {
                 }
                 break;
             }
+            case "app_update": {
+                // Agent OTA: a newer build of this client. The server names the APK and its
+                // digest; everything else is checked on the device. On success this process
+                // is replaced mid-install, so the only ack from here is a failure — the new
+                // version settles the command at startup.
+                String url = cmd.optString("apk_url", payload.optString("apk_url", ""));
+                if (url.isEmpty()) {
+                    reportTerminal(cmdId, serialNumber, "failed", "missing apk_url");
+                    break;
+                }
+                String err = installApk(url, cmdId, serialNumber, new String[1],
+                        payload.optLong("apk_size", -1), payload.optString("apk_etag", null),
+                        true, payload.optString("sha256", ""));
+                if (!err.isEmpty()) {
+                    ClientUpdater.clearPending(this);
+                    reportTerminal(cmdId, serialNumber, "failed", err);
+                }
+                break;
+            }
             case "uninstall": {
                 String pkg = payload.optString("package", "");
                 if (pkg.isEmpty()) {
@@ -1936,6 +1960,13 @@ public class MdmService extends Service {
      */
     private String installApk(String apkUrl, String cmdId, String serial, String[] outPkg,
                               long expectedSize, String etag) {
+        return installApk(apkUrl, cmdId, serial, outPkg, expectedSize, etag, false, null);
+    }
+
+    /** [selfUpdate] installs a new build of THIS client: verified against the running one
+     *  and written down first, because the install ends this process (see ClientUpdater). */
+    private String installApk(String apkUrl, String cmdId, String serial, String[] outPkg,
+                              long expectedSize, String etag, boolean selfUpdate, String sha256) {
         // title[0] starts generic and is upgraded to the app's display label once the APK
         // is parsed, so the on-device notification (and its final result) names the app.
         String[] title = { "AIO MDM" };
@@ -1943,7 +1974,8 @@ public class MdmService extends Service {
         // other's progress (they all shared INSTALL_NOTIFICATION_ID, so the notification
         // "kept switching" between apps). Derived from cmdId → stable for this install.
         int notifId = installNotifId(cmdId);
-        String err = installApkInner(apkUrl, cmdId, serial, outPkg, expectedSize, etag, title, notifId);
+        String err = installApkInner(apkUrl, cmdId, serial, outPkg, expectedSize, etag, title, notifId,
+                selfUpdate, sha256);
         // Final result notification (dismissible; not ongoing) — reuses this install's id so
         // it replaces the progress notification in place. Keep it human; the raw error goes
         // to the log + server, not the user.
@@ -1960,7 +1992,8 @@ public class MdmService extends Service {
     }
 
     private String installApkInner(String apkUrl, String cmdId, String serial, String[] outPkg,
-                                   long expectedSize, String etag, String[] title, int notifId) {
+                                   long expectedSize, String etag, String[] title, int notifId,
+                                   boolean selfUpdate, String sha256) {
         File apkFile = new File(getCacheDir(), "mdm_install_" + System.currentTimeMillis() + ".apk");
         try {
             // Download with Range resume + retry. A stale keep-alive socket ("unexpected
@@ -2031,6 +2064,17 @@ public class MdmService extends Service {
                         + " (" + written + " bytes)");
                 apkFile.delete();
                 return "download appears corrupt (unparseable APK, " + written + " bytes) — will retry";
+            }
+            // A new build of this client: prove it is one before handing it to the installer,
+            // and write down the intent — committing the session ends this process, so the
+            // ack has to come from the version that replaces us.
+            if (selfUpdate) {
+                String why = ClientUpdater.verify(this, apkFile, sha256);
+                if (why != null) {
+                    apkFile.delete();
+                    return why;
+                }
+                ClientUpdater.recordPending(this, cmdId, apkFile);
             }
             showInstallNotification(notifId, title[0], "Installing…", -1, true);
 
@@ -2243,6 +2287,11 @@ public class MdmService extends Service {
         // and update it on its own — without a firmware OTA.
         extra.put("agent_version", clientVersionName());
         extra.put("agent_version_code", clientVersionCode());
+        // Which platform key signed this image: user builds carry release-keys, userdebug
+        // test-keys. An update APK must be signed with the same one, so the server needs
+        // this to hand the device the right build.
+        extra.put("build_tags", SystemPropertiesProxy.get("ro.build.tags", ""));
+        extra.put("build_type", SystemPropertiesProxy.get("ro.build.type", ""));
         populateWifiInfo(extra);
         populateWifiScanResults(extra);
         extra.put("storage_free_gb", getStorageFreeGb());
