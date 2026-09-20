@@ -2394,6 +2394,11 @@ public class MdmService extends Service {
      *  uid, getPackageName() can resolve to the framework's own "android" package, which
      *  reported the platform version (15) and SDK (35) as if they were the client's. */
     private static final String SELF_PACKAGE = "com.aioapp.mdm";
+    // Why the version code jumps to 36: clients up to 1.0.2 read their *own* installed
+    // version through getPackageName(), which under the system shared uid resolves to the
+    // framework's "android" package — versionCode 35 on A15. Such a client refuses any
+    // update numbered below 35 as a downgrade, so the first build able to replace it has
+    // to clear that number. Codes stay monotonic from here.
 
     private String clientVersionName() {
         try {
