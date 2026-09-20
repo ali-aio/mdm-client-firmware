@@ -1,4 +1,4 @@
-package com.aioapp.mdm;
+package aio.app.mdmclient.firmware;
 
 import android.app.AppOpsManager;
 import android.content.Context;

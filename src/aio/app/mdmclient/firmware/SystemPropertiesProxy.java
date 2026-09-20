@@ -1,4 +1,4 @@
-package com.aioapp.mdm;
+package aio.app.mdmclient.firmware;
 
 import java.lang.reflect.Method;
 import android.util.Log;

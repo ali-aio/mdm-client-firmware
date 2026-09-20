@@ -1,4 +1,4 @@
-package com.aioapp.mdm;
+package aio.app.mdmclient.firmware;
 
 import android.app.Activity;
 import android.app.admin.DevicePolicyManager;

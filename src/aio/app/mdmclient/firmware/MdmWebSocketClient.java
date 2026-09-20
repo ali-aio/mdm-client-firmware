@@ -1,4 +1,4 @@
-package com.aioapp.mdm;
+package aio.app.mdmclient.firmware;
 
 import android.util.Base64;
 import android.util.Log;

@@ -1,4 +1,4 @@
-package com.aioapp.mdm;
+package aio.app.mdmclient.firmware;
 
 import android.app.admin.DeviceAdminReceiver;
 import android.content.Context;
