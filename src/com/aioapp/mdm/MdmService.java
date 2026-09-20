@@ -1,4 +1,4 @@
-package aio.app.mdmclient.firmware;
+package com.aioapp.mdm;
 
 import android.app.*;
 import android.content.*;
@@ -70,7 +70,7 @@ public class MdmService extends Service {
     // persistent foreground-service notification (1001).
     private static final int INSTALL_NOTIFICATION_ID = 1002;
 
-    private static final String POLL_ACTION = "aio.app.mdmclient.firmware.POLL";
+    private static final String POLL_ACTION = "com.aioapp.mdm.POLL";
 
     private AlarmManager alarmManager;
     private PendingIntent pollIntent;
@@ -2112,7 +2112,7 @@ public class MdmService extends Service {
                 }
             };
 
-            String action = "aio.app.mdmclient.firmware.INSTALL_RESULT_" + System.currentTimeMillis();
+            String action = "com.aioapp.mdm.INSTALL_RESULT_" + System.currentTimeMillis();
             registerReceiver(resultReceiver, new IntentFilter(action), Context.RECEIVER_NOT_EXPORTED);
             boolean completed;
             try {
@@ -2164,7 +2164,7 @@ public class MdmService extends Service {
 
     /**
      * Silently uninstalls a package via the PackageInstaller API. Running this from the app
-     * (calling package = aio.app.mdmclient.firmware) avoids the AppOps NullPointerException that "pm
+     * (calling package = com.aioapp.mdm) avoids the AppOps NullPointerException that "pm
      * uninstall" hits when invoked from the system UID with no calling package. Requires
      * the DELETE_PACKAGES permission (granted to this platform-signed privileged app).
      * Returns null on success, or an error message on failure.
@@ -2192,7 +2192,7 @@ public class MdmService extends Service {
                 }
             };
 
-            String action = "aio.app.mdmclient.firmware.UNINSTALL_RESULT_" + System.currentTimeMillis();
+            String action = "com.aioapp.mdm.UNINSTALL_RESULT_" + System.currentTimeMillis();
             registerReceiver(receiver, new IntentFilter(action), Context.RECEIVER_NOT_EXPORTED);
             try {
                 PendingIntent pi = PendingIntent.getBroadcast(this, action.hashCode(),

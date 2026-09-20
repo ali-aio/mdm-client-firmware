@@ -1,6 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<config>
-    <allow-in-power-save package="aio.app.mdmclient.firmware" />
-    <allow-in-data-usage-save package="aio.app.mdmclient.firmware" />
-    <allow-unthrottled-location package="aio.app.mdmclient.firmware" />
-</config>

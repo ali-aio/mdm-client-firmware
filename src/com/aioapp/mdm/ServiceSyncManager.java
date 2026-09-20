@@ -1,4 +1,4 @@
-package aio.app.mdmclient.firmware;
+package com.aioapp.mdm;
 
 import java.util.concurrent.locks.ReentrantLock;
 

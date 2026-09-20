@@ -12,6 +12,6 @@ android_app {
 
 prebuilt_etc {
     name: "mdm-client-sysconfig",
-    src: "sysconfig/aio.app.mdmclient.firmware.xml",
+    src: "sysconfig/com.aioapp.mdm.xml",
     sub_dir: "sysconfig",
 }
