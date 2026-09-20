@@ -2,8 +2,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     android:sharedUserId="android.uid.system"
     package="com.aioapp.mdm"
-    android:versionCode="36"
-    android:versionName="1.0.3" >
+    android:versionCode="37"
+    android:versionName="1.0.4" >
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -50,6 +50,13 @@
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+            </intent-filter>
+            <!-- A self-update force-stops this app to replace it, and a force-stop
+                 outlives START_STICKY: without this the client installs its own update
+                 and never comes back until the device happens to reboot. The system
+                 delivers this to the NEW package right after the install. -->
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
 

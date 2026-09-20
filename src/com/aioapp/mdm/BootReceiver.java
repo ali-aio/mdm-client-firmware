@@ -16,6 +16,19 @@ public class BootReceiver extends BroadcastReceiver {
         if (intent == null) return;
         Log.d(TAG, "onReceive: " + intent.getAction());
 
+        // MY_PACKAGE_REPLACED arrives after this app updates itself: the install
+        // force-stopped the old process, which START_STICKY does not survive, so the
+        // service has to be started again or the client is gone until the next boot.
+        if (Intent.ACTION_MY_PACKAGE_REPLACED.equals(intent.getAction())) {
+            Log.i(TAG, "package replaced — restarting MDM service");
+            try {
+                context.startForegroundService(new Intent(context, MdmService.class));
+            } catch (Exception e) {
+                Log.e(TAG, "Failed to restart MdmService after update: " + e.getMessage(), e);
+            }
+            return;
+        }
+
         if (Intent.ACTION_BOOT_COMPLETED.equals(intent.getAction())
                 || Intent.ACTION_LOCKED_BOOT_COMPLETED.equals(intent.getAction())) {
             Log.i(TAG, "Boot completed - starting MDM service");
