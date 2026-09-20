@@ -2289,6 +2289,7 @@ public class MdmService extends Service {
         // What this client is, separately from the OS build it ships in. build_id names
         // the firmware; these name the app, so the server can see a client that is behind
         // and update it on its own — without a firmware OTA.
+        extra.put("agent_package", SELF_PACKAGE);
         extra.put("agent_version", clientVersionName());
         extra.put("agent_version_code", clientVersionCode());
         // Which platform key signed this image: user builds carry release-keys, userdebug
@@ -2389,9 +2390,14 @@ public class MdmService extends Service {
     }
 
     /** This app's versionName from its own manifest ("" when it cannot be read). */
+    /** This app's package, named rather than asked for: running with the system shared
+     *  uid, getPackageName() can resolve to the framework's own "android" package, which
+     *  reported the platform version (15) and SDK (35) as if they were the client's. */
+    private static final String SELF_PACKAGE = "com.aioapp.mdm";
+
     private String clientVersionName() {
         try {
-            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+            return getPackageManager().getPackageInfo(SELF_PACKAGE, 0).versionName;
         } catch (Exception e) {
             return "";
         }
@@ -2400,7 +2406,7 @@ public class MdmService extends Service {
     /** This app's versionCode — what the server compares to decide a client is behind. */
     private long clientVersionCode() {
         try {
-            android.content.pm.PackageInfo pi = getPackageManager().getPackageInfo(getPackageName(), 0);
+            android.content.pm.PackageInfo pi = getPackageManager().getPackageInfo(SELF_PACKAGE, 0);
             return android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P
                     ? pi.getLongVersionCode() : pi.versionCode;
         } catch (Exception e) {

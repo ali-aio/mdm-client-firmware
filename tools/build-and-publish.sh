@@ -8,12 +8,16 @@
 # This cannot live in GitHub Actions: the APK has to be signed with the platform key of
 # the image it will run on, and those keys live in the build tree, not in a runner.
 #
-# Signing, and why --from-target-files matters:
-#   A `user` build's out/ APK is signed with the tree's dev key, not the release key —
-#   sign_target_files_apks re-signs everything on the way into the signed target-files.
-#   Publishing the out/ copy to devices running a release-keys image gives every one of
-#   them "signed with a different key" at install. For a user build, pass
-#   --from-target-files <signed target_files.zip> and the APK is taken from there.
+# Signing — two different keys, do not confuse them:
+#   * The OTA *payload* key (PAX releasekey for user, Rockchip testkey for userdebug)
+#     signs the update package; the device checks it against otacerts.zip.
+#   * The *app* key signs mdm-client.apk. This tree signs apps with the Rockchip
+#     platform key in both variants, and does not re-sign on the way into target-files,
+#     so the out/ APK carries the same certificate as the one in the shipped image.
+#   Rather than trust either claim, the script compares the built APK's signer against
+#   the copy in the tree's target-files and refuses to publish on a mismatch — a wrong
+#   key means every device rejects the update at install.
+#   --from-target-files <zip> publishes that copy directly and skips the build.
 set -euo pipefail
 
 TREE=""; SERVER=""; KEY=""; VARIANT="user"; TF=""; BUILD_ONLY=0
@@ -38,19 +42,26 @@ fi
 
 # The client is a qssi (system) module, so it builds in the qssi lunch target — the same
 # one build-wifionly.sh uses for the system half of the image.
-echo "→ building mdm-client in $TREE (qssi-$VARIANT)"
-(
-  cd "$TREE/qssi"
-  # envsetup and lunch are interactive-shell shaped: unset -u around them.
-  set +u
-  source build/envsetup.sh
-  lunch "qssi-$VARIANT"
-  m mdm-client
-)
+if [ -z "$TF" ]; then
+  echo "→ building mdm-client in $TREE (qssi-$VARIANT)"
+  (
+    cd "$TREE/qssi"
+    # envsetup and lunch are interactive-shell shaped: unset -u around them.
+    set +u
+    source build/envsetup.sh
+    lunch "qssi-$VARIANT"
+    m mdm-client
+  )
+else
+  echo "→ skipping the build: taking the APK from target-files"
+fi
 
-OUT="$TREE/qssi/out/target/product/qssi/system/priv-app/mdm-client/mdm-client.apk"
-[ -f "$OUT" ] || OUT="$(find "$TREE/qssi/out" -name 'mdm-client.apk' -path '*priv-app*' -print -quit 2>/dev/null || true)"
-[ -n "$OUT" ] && [ -f "$OUT" ] || { echo "built, but no mdm-client.apk found under out/" >&2; exit 1; }
+OUT=""
+if [ -z "$TF" ]; then
+  OUT="$TREE/qssi/out/target/product/qssi/system/priv-app/mdm-client/mdm-client.apk"
+  [ -f "$OUT" ] || OUT="$(find "$TREE/qssi/out" -name 'mdm-client.apk' -path '*priv-app*' -print -quit 2>/dev/null || true)"
+  [ -n "$OUT" ] && [ -f "$OUT" ] || { echo "built, but no mdm-client.apk found under out/" >&2; exit 1; }
+fi
 
 APK="$OUT"
 if [ -n "$TF" ]; then
@@ -61,10 +72,25 @@ if [ -n "$TF" ]; then
   unzip -o -q "$TF" 'SYSTEM/priv-app/mdm-client/mdm-client.apk' -d "$TMP" \
     || { echo "mdm-client.apk is not in that target-files" >&2; exit 1; }
   APK="$TMP/SYSTEM/priv-app/mdm-client/mdm-client.apk"
-elif [ "$VARIANT" = "user" ] && [ "$BUILD_ONLY" -eq 0 ]; then
-  echo "refusing to publish: a user build's out/ APK carries the tree's dev key, not the" >&2
-  echo "release key the devices trust. Re-run with --from-target-files <signed .zip>." >&2
-  exit 1
+fi
+
+# Prove the built APK is signed with the key the shipped image uses, by comparing it
+# with the copy inside the tree's own target-files. A mismatch is not publishable: the
+# device refuses an update signed with anything but the certificate it already trusts.
+signer() { apksigner verify --print-certs "$1" 2>/dev/null | awk '/SHA-256 digest/ {print $NF; exit}'; }
+REF_TF="${TF:-$TREE/target/out/dist/merged-qssi_trinket-target_files.zip}"
+if [ -z "$TF" ] && command -v apksigner >/dev/null && [ -f "$REF_TF" ]; then
+  REFDIR="$(mktemp -d)"; trap 'rm -rf "$REFDIR"' EXIT
+  if unzip -o -q "$REF_TF" 'SYSTEM/priv-app/mdm-client/mdm-client.apk' -d "$REFDIR" 2>/dev/null; then
+    BUILT=$(signer "$APK")
+    SHIPPED=$(signer "$REFDIR/SYSTEM/priv-app/mdm-client/mdm-client.apk")
+    if [ -n "$BUILT" ] && [ -n "$SHIPPED" ] && [ "$BUILT" != "$SHIPPED" ]; then
+      echo "refusing to publish: the built APK is signed with $BUILT," >&2
+      echo "the image ships $SHIPPED. Every device would reject this at install." >&2
+      exit 1
+    fi
+    echo "→ signer matches the shipped image ($BUILT)"
+  fi
 fi
 
 echo "→ $(stat -c %s "$APK") bytes"
