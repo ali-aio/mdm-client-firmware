@@ -291,7 +291,11 @@ public class MdmService extends Service {
 
         // Product (resolved once at field init) gates the receiver registrations below and
         // the telemetry collectors via its capabilities.
-        Log.i(TAG, "Device product=" + product.key()
+        // The client's own version leads the line: the first question about a device is
+        // which client it runs, and since 1.0.0 that can differ from the firmware it
+        // shipped with (ClientUpdater installs newer builds over it).
+        Log.i(TAG, "MdmClient v" + clientVersionName() + " (" + clientVersionCode() + ")"
+                + " product=" + product.key()
                 + " battery=" + product.hasBattery()
                 + " charging=" + product.hasCharging()
                 + " wlc=" + product.hasWlc());
