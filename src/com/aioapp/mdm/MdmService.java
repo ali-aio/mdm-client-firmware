@@ -277,12 +277,15 @@ public class MdmService extends Service {
         dpm = (DevicePolicyManager) getSystemService(Context.DEVICE_POLICY_SERVICE);
         adminComponent = new ComponentName(this, MdmAdminReceiver.class);
         // startForeground MUST be called within ~5s of startForegroundService or the OS crashes
-        // the process (ForegroundServiceDidNotStartInTimeAllowedException). ensureDeviceOwner()
+        // the process (ForegroundServiceDidNotStartInTimeAllowedException). releaseDeviceOwnerIfAny()
         // makes synchronous DPM binder calls that can stall past 5s on a cold fleet boot, so
         // promote to foreground FIRST, then do provisioning.
         createNotificationChannel();
         startForeground(NOTIFICATION_ID, buildNotification("Your device is set up and protected"));
-        ensureDeviceOwner();
+        // Kiosk needs the active admin, never Device Owner — KioskManager claims and releases the
+        // admin with the kiosk config itself.
+        releaseDeviceOwnerIfAny();
+        KioskManager.releaseAdminIfUnused(this, dpm, adminComponent);
 
         // A self-update the previous build started: this one reports how it went. Queued on
         // the executor because the ack may have to go over HTTP before the socket is up.
@@ -498,24 +501,30 @@ public class MdmService extends Service {
         }
     }
 
-    private void ensureDeviceOwner() {
-        if (dpm.isDeviceOwnerApp(getPackageName())) {
-            Log.i(TAG, "Already device owner");
-            return;
-        }
-        // Mirror what `adb shell dpm set-device-owner` does internally:
-        // setActiveAdmin must be called first, then setDeviceOwner.
+    /**
+     * Give Device Owner back. The client has no use for it — kiosk lock-task is authorized by
+     * the package allowlist the active admin writes (LockTaskController.getLockTaskAuth), not by
+     * ownership — and holding it makes the device un-certifiable: GTS removes non-test admins
+     * before its device-policy tests and the multiuser modules abort on device-owner removal,
+     * while a non-test admin cannot be removed by anything but its own package
+     * (DevicePolicyManagerService.forceRemoveActiveAdmin — what `dpm remove-active-admin` calls —
+     * throws for it, root and shell included).
+     *
+     * Only the device-owner package itself may clear the owner, so this has to happen in here.
+     * Clearing it also drops the DISALLOW_ADD_USER / DISALLOW_ADD_*_PROFILE restrictions the
+     * framework attached to the owner (clearDeviceOwnerLocked -> clearDeviceOwnerUserRestriction),
+     * which is what lets a GTS multiuser run add users on a device provisioned earlier.
+     *
+     * The active admin is a separate thing: KioskManager claims it only while a device is kiosked
+     * and releases it when kiosk goes off, so a device that is never kiosked holds neither.
+     */
+    private void releaseDeviceOwnerIfAny() {
         try {
-            dpm.setActiveAdmin(adminComponent, true);
-            Log.i(TAG, "setActiveAdmin OK");
+            if (!dpm.isDeviceOwnerApp(getPackageName())) return;
+            dpm.clearDeviceOwnerApp(getPackageName());
+            Log.i(TAG, "released Device Owner — kiosk runs on the active admin alone");
         } catch (Exception e) {
-            Log.e(TAG, "setActiveAdmin failed: " + e.getMessage());
-        }
-        try {
-            boolean result = dpm.setDeviceOwner(adminComponent, android.os.UserHandle.USER_SYSTEM);
-            Log.i(TAG, "setDeviceOwner: " + result);
-        } catch (Exception e) {
-            Log.e(TAG, "setDeviceOwner failed: " + e.getMessage());
+            Log.e(TAG, "clearDeviceOwnerApp failed: " + e.getMessage());
         }
     }
 

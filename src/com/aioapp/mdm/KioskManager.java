@@ -52,9 +52,15 @@ public class KioskManager {
                 if (intent == null) {
                     Log.w(TAG, "Kiosk package not installed/launchable, refusing lock-task: " + pkg);
                     stopSystemLockTask();
-                    dpm.setLockTaskPackages(admin, new String[]{});
+                    clearLockTaskAllowlist(dpm, admin);
                     return;
                 }
+
+                // Lock-task policy can only be written through an active admin owned by this
+                // package, so claim one here — on demand, not at startup: a device that is never
+                // kiosked then holds no admin at all, which is what a GTS run needs. Unlike
+                // Device Owner, setActiveAdmin works at any point in a device's life.
+                if (!ensureAdmin(dpm, admin)) return;
 
                 // 1. Whitelist the kiosk package AND mdm-client itself, so the offline-exit
                 //    UnlockActivity can surface over the locked kiosk app.
@@ -100,7 +106,7 @@ public class KioskManager {
             } else {
                 // Remove the package from the allowlist FIRST (that is what authorises the
                 // system to drop the task), then stop lock-task.
-                dpm.setLockTaskPackages(admin, new String[]{});
+                clearLockTaskAllowlist(dpm, admin);
                 stopSystemLockTask();
                 Settings.Global.putString(ctx.getContentResolver(),
                         Settings.Global.POLICY_CONTROL, "");
@@ -116,10 +122,13 @@ public class KioskManager {
                     goHome(ctx);
                     if (isLocked(ctx)) {
                         stopSystemLockTask();
-                        dpm.setLockTaskPackages(admin, new String[]{});
+                        clearLockTaskAllowlist(dpm, admin);
                         goHome(ctx);
                     }
                 }
+                // Kiosk is off and nothing else uses the admin: hand it back, so the device
+                // returns to the state a certification run can use (no admin, no device owner).
+                releaseAdmin(dpm, admin);
                 Log.i(TAG, "Kiosk disabled (stillLocked=" + isLocked(ctx) + ")");
             }
         } catch (Exception e) {
@@ -132,14 +141,13 @@ public class KioskManager {
      * intact (still enabled); a local suspension flag prevents re-lock until reboot or a
      * server kiosk toggle. Sends the user to the launcher so the device isn't stuck on the
      * now-unlocked kiosk app.
+     *
+     * The active admin deliberately stays: the config still says kiosk is enabled, so a reboot
+     * must be able to re-lock without waiting for a server round trip.
      */
     public static void suspendLocally(Context ctx, DevicePolicyManager dpm, ComponentName admin) {
         stopSystemLockTask();
-        try {
-            dpm.setLockTaskPackages(admin, new String[]{});
-        } catch (Exception e) {
-            Log.e(TAG, "suspendLocally clear packages error: " + e.getMessage());
-        }
+        clearLockTaskAllowlist(dpm, admin);
         KioskExit.markExited(ctx);
         try {
             Intent home = new Intent(Intent.ACTION_MAIN);
@@ -227,6 +235,82 @@ public class KioskManager {
             ActivityTaskManager.getService().stopSystemLockTaskMode();
         } catch (Exception e) {
             Log.e(TAG, "stopSystemLockTask error: " + e.getMessage());
+        }
+    }
+
+    /** True when DPM will accept lock-task policy calls for this component. */
+    private static boolean isAdminActive(DevicePolicyManager dpm, ComponentName admin) {
+        try {
+            return dpm.isAdminActive(admin);
+        } catch (Exception e) {
+            Log.e(TAG, "isAdminActive error: " + e.getMessage());
+            return false;
+        }
+    }
+
+    /** Clear the allowlist if we still hold the admin that wrote it. A released admin cannot be
+     *  used, and on a device we no longer hold there is nothing to clear. */
+    private static void clearLockTaskAllowlist(DevicePolicyManager dpm, ComponentName admin) {
+        if (!isAdminActive(dpm, admin)) return;
+        try {
+            dpm.setLockTaskPackages(admin, new String[]{});
+        } catch (Exception e) {
+            Log.e(TAG, "clear lock-task allowlist error: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Claim the active admin that authorises {@code setLockTaskPackages} / {@code
+     * setLockTaskFeatures}. Kiosk is the only thing in the client that needs one, so it is
+     * claimed when kiosk goes on and released when it goes off.
+     *
+     * Deliberately NOT Device Owner: ownership cannot be deferred (setDeviceOwner is refused once
+     * user setup has completed, DevicePolicyManagerService.STATUS_USER_SETUP_COMPLETED) and it
+     * makes the device un-certifiable — GTS needs every non-test admin gone and cannot remove one
+     * itself. The admin path has no such precondition.
+     */
+    private static boolean ensureAdmin(DevicePolicyManager dpm, ComponentName admin) {
+        if (isAdminActive(dpm, admin)) return true;
+        try {
+            // refreshing=true, so a repeat call is a no-op rather than "Admin is already added".
+            dpm.setActiveAdmin(admin, true);
+            Log.i(TAG, "claimed active admin for kiosk");
+            return true;
+        } catch (Exception e) {
+            Log.e(TAG, "setActiveAdmin failed: " + e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Give the admin back when nothing wants it: no saved kiosk config, or kiosk off in it.
+     * Runs at service start, so a client that used to claim an admin unconditionally (anything
+     * before 1.1.0) hands it back without waiting for the next config change, and a device whose
+     * kiosk was turned off while the client was down ends up clean too. The invariant is
+     * "an admin exists on this device if and only if kiosk is enabled for it".
+     *
+     * Kiosk *on* but locally exited (offline exit) keeps the admin: the config still says enabled,
+     * and the next reboot has to be able to re-lock without a server round trip.
+     */
+    public static void releaseAdminIfUnused(Context ctx, DevicePolicyManager dpm, ComponentName admin) {
+        JSONObject config = loadConfig(ctx);
+        if (config != null && config.optBoolean("kiosk_enabled", false)) return;
+        releaseAdmin(dpm, admin);
+    }
+
+    /**
+     * Drop the admin once kiosk is off. Only the package that owns the component can do this
+     * (DevicePolicyManagerService.removeActiveAdmin) — which is the reason the release has to
+     * live in the client and not in an operator script: nothing else, adb included, can remove a
+     * non-test admin.
+     */
+    private static void releaseAdmin(DevicePolicyManager dpm, ComponentName admin) {
+        if (!isAdminActive(dpm, admin)) return;
+        try {
+            dpm.removeActiveAdmin(admin);
+            Log.i(TAG, "released active admin (kiosk off)");
+        } catch (Exception e) {
+            Log.e(TAG, "removeActiveAdmin failed: " + e.getMessage());
         }
     }
 
