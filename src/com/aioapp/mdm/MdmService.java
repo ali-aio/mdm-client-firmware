@@ -1387,10 +1387,10 @@ public class MdmService extends Service {
                 }
                 break;
             }
-            case "get_app_inventory": {
-                reportTerminal(cmdId, serialNumber, "completed", getInstalledApps().toString());
-                break;
-            }
+            // get_app_inventory was removed: nothing has created one for a long time (no
+            // server-side creator anywhere), and the inventory it returned now rides every
+            // check-in as installed_apps. A command type with no sender is worse than
+            // absent — it reads as a feature and hides that the check-in path superseded it.
             case "mic_gain_set": {
                 // Admin sets (or clears with value=null/"") the TX_DEC enforcement target.
                 // Only works on firmware with the vendor daemon; reports why otherwise.
@@ -2306,6 +2306,15 @@ public class MdmService extends Service {
         // this to hand the device the right build.
         extra.put("build_tags", SystemPropertiesProxy.get("ro.build.tags", ""));
         extra.put("build_type", SystemPropertiesProxy.get("ro.build.type", ""));
+        // Whether this image can take an MDM OTA at all. The server reads this before it
+        // decides between an MDM update and the legacy otautil path, and until now had to
+        // guess from build-id strings. A/B is the precondition and the honest test:
+        // OtaUpdateManager hands the package to UpdateEngine, which only exists on a
+        // seamless-update device. Deliberately a lone flag and not part of a capability
+        // list — a reported list replaces the server's product defaults outright, so one
+        // omission there would withdraw commands from the whole fleet at once.
+        extra.put("ota_supported",
+                "true".equalsIgnoreCase(SystemPropertiesProxy.get("ro.build.ab_update", "")));
         populateWifiInfo(extra);
         populateWifiScanResults(extra);
         extra.put("storage_free_gb", getStorageFreeGb());
