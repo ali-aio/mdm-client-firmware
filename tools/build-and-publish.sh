@@ -174,9 +174,32 @@ if [ -z "$CHANGELOG_IN" ]; then
   echo "  (uncommitted work in the tree will not appear here — pass --changelog to name it)"
 fi
 CHANGELOG=$(printf '%s' "$CHANGELOG_TEXT" | python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.stdin.read().strip()))' || true)
-curl -fsS -X POST "$SERVER/api/v1/agent-apk?slot=$SLOT&name=mdm-client.apk&changelog=$CHANGELOG" \
-  -H "X-API-Key: $KEY" \
-  -H "Content-Type: application/vnd.android.package-archive" \
-  --data-binary "@$APK"
+# Retry a 502/503/504: the server is a container that the deploy pipeline recreates, so
+# publishing while a deploy is in flight lands in the gap where nothing answers and comes
+# back as a bare 502 from the load balancer. That is a "come back in a minute", not a
+# reason to rebuild the client and start over. A 4xx (bad key, wrong slot, rejected
+# signer) is a real answer and is never retried.
+PUSH_URL="$SERVER/api/v1/agent-apk?slot=$SLOT&name=mdm-client.apk&changelog=$CHANGELOG"
+for attempt in 1 2 3 4 5; do
+  code=$(curl -sS -o /tmp/.mdm-publish-out -w '%{http_code}' -X POST "$PUSH_URL" \
+    -H "X-API-Key: $KEY" \
+    -H "Content-Type: application/vnd.android.package-archive" \
+    --data-binary "@$APK") || code=000
+  case "$code" in
+    2*) cat /tmp/.mdm-publish-out; rm -f /tmp/.mdm-publish-out; break ;;
+    502|503|504|000)
+      if [ "$attempt" = 5 ]; then
+        echo "publish failed after $attempt attempts (HTTP $code) — is a deploy running?" >&2
+        cat /tmp/.mdm-publish-out >&2 2>/dev/null; rm -f /tmp/.mdm-publish-out
+        exit 1
+      fi
+      echo "→ server not answering (HTTP $code, likely mid-deploy) — retrying in ${attempt}0s"
+      sleep $((attempt * 10)) ;;
+    *)
+      echo "publish refused (HTTP $code):" >&2
+      cat /tmp/.mdm-publish-out >&2 2>/dev/null; rm -f /tmp/.mdm-publish-out
+      exit 1 ;;
+  esac
+done
 echo
 echo "→ devices on an older client now show \"Update agent\" on their device page."
