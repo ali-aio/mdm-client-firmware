@@ -40,6 +40,21 @@ final class ClientUpdater {
     private ClientUpdater() {}
 
     /**
+     * Prefix on the reason verify() returns when the APK is a genuine build of this app
+     * that simply is not newer than the one running. The update has nothing to do — it is
+     * not a failure, and callers distinguish the two with {@link #notNewer} rather than
+     * matching on prose. Pushing an update at a device already on that build is a normal
+     * thing for an operator to do (the Clients page offers it per device), and reporting
+     * it as failed made an up-to-date device look broken.
+     */
+    static final String ALREADY_CURRENT = "already on ";
+
+    /** True when verify() refused the APK only because the device is already on it. */
+    static boolean notNewer(String why) {
+        return why != null && why.startsWith(ALREADY_CURRENT);
+    }
+
+    /**
      * Is this APK a genuine newer build of this same app? Returns null when it is safe to
      * install, otherwise the reason it was refused. Android would reject a mismatched
      * signature or package anyway; checking here fails early and says why, and the version
@@ -65,8 +80,9 @@ final class ClientUpdater {
             return "could not read the installed version: " + e.getMessage();
         }
         if (versionCode(fresh) <= versionCode(cur)) {
-            return "APK " + fresh.versionName + " (" + versionCode(fresh) + ") is not newer than "
-                    + "the installed " + cur.versionName + " (" + versionCode(cur) + ")";
+            return ALREADY_CURRENT + (fresh.versionName == null ? String.valueOf(versionCode(fresh))
+                    : fresh.versionName) + " (" + versionCode(fresh) + "); this device runs "
+                    + cur.versionName + " (" + versionCode(cur) + ")";
         }
         // The platform key differs per build variant (user vs userdebug), so a wrong-variant
         // APK is the likely mistake here, not a hostile one. Name it plainly.

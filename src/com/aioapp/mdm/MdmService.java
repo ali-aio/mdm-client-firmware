@@ -942,10 +942,11 @@ public class MdmService extends Service {
         drainPendingOtaAcks();
     }
 
-    /** Relay interim install progress ('downloading' with a percent, or 'installing')
-     *  to the server so the dashboard shows it live. WS-first, HTTP fallback; percent
+    /** Relay interim progress to the server so the dashboard shows it live: 'downloading'
+     *  with a percent or 'installing' for an install, 'running' for a command that has
+     *  started and reports nothing until it finishes. WS-first, HTTP fallback; percent
      *  < 0 omits the number. Non-terminal — the terminal ack still follows. */
-    private void reportInstallProgress(String cmdId, String serial, String status, int percent) {
+    private void reportProgress(String cmdId, String serial, String status, int percent) {
         if (cmdId == null || cmdId.isEmpty()) return;
         if (wsClient != null && wsClient.isConnected()) {
             try {
@@ -1296,7 +1297,11 @@ public class MdmService extends Service {
                         true, payload.optString("sha256", ""));
                 if (!err.isEmpty()) {
                     ClientUpdater.clearPending(this);
-                    reportTerminal(cmdId, serialNumber, "failed", err);
+                    // Already on this build (or newer): the update has nothing to do. That is
+                    // the operator aiming an update at a device that does not need it, not a
+                    // device failing — settle it as completed so the command list says so.
+                    reportTerminal(cmdId, serialNumber,
+                            ClientUpdater.notNewer(err) ? "completed" : "failed", err);
                 }
                 break;
             }
@@ -1318,6 +1323,11 @@ public class MdmService extends Service {
                     break;
                 }
                 java.lang.Process p = Runtime.getRuntime().exec(new String[]{"sh", "-c", shellCmd});
+                // A shell reports nothing until it exits, and it may take up to the 30s cap
+                // below — say it started, so the command list shows "running" instead of
+                // leaving an operator looking at a command that appears not to have landed.
+                // Terminal ack still follows; this is interim only (see reportProgress).
+                reportProgress(cmdId, serialNumber, "running", -1);
                 // Drain stderr in a side thread; cap at 10 MB to prevent OOM
                 ByteArrayOutputStream stderrBuf = new ByteArrayOutputStream();
                 Thread stderrThread = new Thread(() -> {
@@ -2016,7 +2026,7 @@ public class MdmService extends Service {
             // The 15-min retry budget lets a real network disturbance recover and resume
             // instead of hard-failing after a few attempts, matched to the server-side
             // stalled-install sweep so a device that never recovers gives up in step. FW-2026-000020.
-            reportInstallProgress(cmdId, serial, "downloading", expectedSize > 0 ? 0 : -1);
+            reportProgress(cmdId, serial, "downloading", expectedSize > 0 ? 0 : -1);
             showInstallNotification(notifId, title[0], "Downloading…", expectedSize > 0 ? 0 : -1, true);
             final int[] lastPct = { -1 };       // notification: fine-grained, every 1%
             final int[] lastReported = { -1 };  // server report: throttled to 5% to avoid spam
@@ -2037,7 +2047,7 @@ public class MdmService extends Service {
                                 // doesn't flood check-ins.
                                 if (pct >= lastReported[0] + 5) {
                                     lastReported[0] = pct;
-                                    reportInstallProgress(cmdId, serial, "downloading", pct);
+                                    reportProgress(cmdId, serial, "downloading", pct);
                                 }
                             }
                         }
@@ -2049,7 +2059,7 @@ public class MdmService extends Service {
             Log.i(TAG, "APK downloaded to " + apkFile.getAbsolutePath() + " (" + written + " bytes)");
             if (written == 0) return "download failed: empty file";
             // Download done → now installing.
-            reportInstallProgress(cmdId, serial, "installing", -1);
+            reportProgress(cmdId, serial, "installing", -1);
 
             // Extract package name (+ display label) from the APK for fallback verification,
             // a clearer error, and the user-facing notification title.
@@ -2311,8 +2321,10 @@ public class MdmService extends Service {
         // guess from build-id strings. A/B is the precondition and the honest test:
         // OtaUpdateManager hands the package to UpdateEngine, which only exists on a
         // seamless-update device. Deliberately a lone flag and not part of a capability
-        // list — a reported list replaces the server's product defaults outright, so one
-        // omission there would withdraw commands from the whole fleet at once.
+        // list: what a firmware image can do belongs in the server's product catalog,
+        // where it is reviewable, not in per-device reporting (internal/db/db.go, CapSet).
+        // A build fact this specific — does THIS image have an A/B slot — is the part the
+        // catalog cannot know, so it is reported on its own.
         extra.put("ota_supported",
                 "true".equalsIgnoreCase(SystemPropertiesProxy.get("ro.build.ab_update", "")));
         populateWifiInfo(extra);
