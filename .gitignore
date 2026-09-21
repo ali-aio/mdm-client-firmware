@@ -3,3 +3,9 @@ src/com/aioapp/mdm/mdm-config.json
 *.md
 AB_OTATEST/
 AB_OTATEST.zip
+
+# Publishing credentials belong outside the repo (~/.config/aio-mdm/publish.key) —
+# this repository is public. These are a backstop, not the intended location.
+publish.key
+*.publish-key
+.env
