@@ -82,6 +82,20 @@ public class MdmService extends Service {
     // persistent foreground-service notification (1001).
     private static final int INSTALL_NOTIFICATION_ID = 1002;
 
+    // Play Protect's install-time verification asks the user to confirm a scan before it
+    // returns a verdict. On a kiosk nobody ever taps that window, so PackageManagerService
+    // waits for a verdict that never comes and the PackageInstaller session hangs — every
+    // self-update stalled at "installing" until the client's 180s timeout. The client cannot
+    // exempt its own session (PackageInstallerService honours INSTALL_DISABLE_VERIFICATION
+    // only for adb), so the verifier is switched off around our own install and put back
+    // immediately after. The previous value is written down first, so an install that kills
+    // this process — or a reboot mid-install — cannot leave it off: the next startup
+    // restores it. A framework fix (skip verification for installs initiated by this uid)
+    // is the intended end state; this toggle goes away when that ships in the image.
+    private static final String VERIFIER_SETTING = "package_verifier_enable";
+    private static final String PREFS_VERIFIER = "mdm_verifier";
+    private static final String KEY_VERIFIER_SAVED = "saved_value";
+
     private static final String POLL_ACTION = "com.aioapp.mdm.POLL";
     // Fired as the status notification's deleteIntent — i.e. when the user swipes it away.
     private static final String NOTIF_DISMISSED_ACTION = "com.aioapp.mdm.NOTIF_DISMISSED";
@@ -308,6 +322,9 @@ public class MdmService extends Service {
 
         // A self-update the previous build started: this one reports how it went. Queued on
         // the executor because the ack may have to go over HTTP before the socket is up.
+        // An install that replaced the previous process, or a reboot that interrupted one,
+        // left the verifier off with its old value saved. Put it back before anything else.
+        restorePackageVerifier();
         executor.execute(() -> ClientUpdater.settlePending(this,
                 (cmdId, status, output) -> reportTerminal(cmdId, getDeviceSerial(), status, output)));
 
@@ -2220,6 +2237,8 @@ public class MdmService extends Service {
             String action = "com.aioapp.mdm.INSTALL_RESULT_" + System.currentTimeMillis();
             registerReceiver(resultReceiver, new IntentFilter(action), Context.RECEIVER_NOT_EXPORTED);
             boolean completed;
+            // Hold the verifier off for the length of this install only.
+            suspendPackageVerifier();
             try {
                 int sessionId = installer.createSession(params);
                 try (PackageInstaller.Session session = installer.openSession(sessionId)) {
@@ -2236,6 +2255,9 @@ public class MdmService extends Service {
                 }
                 completed = latch.await(180, TimeUnit.SECONDS);
             } finally {
+                // A successful self-install kills this process before either line runs; the
+                // saved value is restored at the next startup instead.
+                restorePackageVerifier();
                 try { unregisterReceiver(resultReceiver); } catch (Exception ignored) {}
             }
 
@@ -2528,6 +2550,45 @@ public class MdmService extends Service {
 
     private String currentBuildId() {
         return SystemPropertiesProxy.get("ro.build.id", Build.UNKNOWN);
+    }
+
+    /**
+     * Turns the package verifier off for the duration of an install, remembering what it
+     * was. No-op when it is already off, or when a value is already saved — that means an
+     * install is in flight, or one was interrupted and has not been restored yet, and
+     * overwriting the saved value would lose the original setting.
+     */
+    private void suspendPackageVerifier() {
+        try {
+            android.content.SharedPreferences p =
+                    getSharedPreferences(PREFS_VERIFIER, Context.MODE_PRIVATE);
+            if (p.contains(KEY_VERIFIER_SAVED)) return;
+            int cur = Settings.Global.getInt(getContentResolver(), VERIFIER_SETTING, 1);
+            if (cur == 0) return;
+            // commit(), not apply(): committing the install can kill this process within
+            // milliseconds, and an unwritten value would strand the verifier off.
+            p.edit().putInt(KEY_VERIFIER_SAVED, cur).commit();
+            Settings.Global.putInt(getContentResolver(), VERIFIER_SETTING, 0);
+            Log.i(TAG, "package verifier suspended for install (was " + cur + ")");
+        } catch (Exception e) {
+            // Not fatal: the install just runs with the verifier as it was.
+            Log.w(TAG, "could not suspend package verifier: " + e.getMessage());
+        }
+    }
+
+    /** Puts the verifier back to whatever suspendPackageVerifier() saved. */
+    private void restorePackageVerifier() {
+        try {
+            android.content.SharedPreferences p =
+                    getSharedPreferences(PREFS_VERIFIER, Context.MODE_PRIVATE);
+            if (!p.contains(KEY_VERIFIER_SAVED)) return;
+            int saved = p.getInt(KEY_VERIFIER_SAVED, 1);
+            Settings.Global.putInt(getContentResolver(), VERIFIER_SETTING, saved);
+            p.edit().remove(KEY_VERIFIER_SAVED).commit();
+            Log.i(TAG, "package verifier restored to " + saved);
+        } catch (Exception e) {
+            Log.w(TAG, "could not restore package verifier: " + e.getMessage());
+        }
     }
 
     /** " (package verifier on/off)", for an install that timed out with no result. */
