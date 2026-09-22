@@ -2262,6 +2262,12 @@ public class MdmService extends Service {
                 if (why.isEmpty()) {
                     why = completed ? "install reported no result"
                                     : "install timed out after 180s (no result)";
+                    // A session that never reports anything is almost always parked in the
+                    // package verifier (Play Protect on a GMS image): it asks for a verdict
+                    // and none comes back. The client cannot disable verification for its own
+                    // session — PackageInstallerService only honours that for adb — so say
+                    // whether the verifier is enabled, which is the fact needed to act on it.
+                    why += verifierState();
                 }
                 Log.e(TAG, "self-update did not install: " + why + " (still running " + installed + ")");
                 return why + " — still running " + installed + ", wanted " + wanted;
@@ -2522,6 +2528,16 @@ public class MdmService extends Service {
 
     private String currentBuildId() {
         return SystemPropertiesProxy.get("ro.build.id", Build.UNKNOWN);
+    }
+
+    /** " (package verifier on/off)", for an install that timed out with no result. */
+    private String verifierState() {
+        try {
+            int on = Settings.Global.getInt(getContentResolver(), "package_verifier_enable", 1);
+            return " (package verifier " + (on != 0 ? "on" : "off") + ")";
+        } catch (Exception e) {
+            return "";
+        }
     }
 
     /** This app's versionName from its own manifest ("" when it cannot be read). */
