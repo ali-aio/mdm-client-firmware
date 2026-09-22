@@ -2294,6 +2294,34 @@ public class MdmService extends Service {
                 Log.e(TAG, "self-update did not install: " + why + " (still running " + installed + ")");
                 return why + " — still running " + installed + ", wanted " + wanted;
             }
+            // Same question for an ordinary app install, asked properly: "is the package
+            // present?" says nothing when the app was already installed and the update did
+            // not take. Only a version code at or above the APK's proves this install landed.
+            if (apkPackageName != null && apkInfo != null) {
+                long wanted = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
+                        ? apkInfo.getLongVersionCode() : apkInfo.versionCode;
+                long installed = -1;
+                try {
+                    android.content.pm.PackageInfo cur =
+                            getPackageManager().getPackageInfo(apkPackageName, 0);
+                    installed = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
+                            ? cur.getLongVersionCode() : cur.versionCode;
+                } catch (android.content.pm.PackageManager.NameNotFoundException ignored) {
+                }
+                if (installed >= wanted) {
+                    Log.i(TAG, "APK package " + apkPackageName + " is at " + installed
+                            + " (verified via PackageManager"
+                            + (completed ? " after callback reported failure)" : " after timeout)"));
+                    return "";
+                }
+                Log.e(TAG, "APK package " + apkPackageName + " is at " + installed + ", wanted "
+                        + wanted + (completed ? " (callback reported failure)"
+                                              : " (timed out after 180s)"));
+                String why = failReason.get();
+                if (!why.isEmpty()) return why;
+                return (completed ? "install failed" : "install timed out after 180s")
+                        + verifierState() + " — package at " + installed + ", wanted " + wanted;
+            }
             if (apkPackageName != null) {
                 try {
                     getPackageManager().getPackageInfo(apkPackageName, 0);
