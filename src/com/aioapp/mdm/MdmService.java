@@ -71,6 +71,8 @@ public class MdmService extends Service {
     private static final int INSTALL_NOTIFICATION_ID = 1002;
 
     private static final String POLL_ACTION = "com.aioapp.mdm.POLL";
+    // Fired as the status notification's deleteIntent — i.e. when the user swipes it away.
+    private static final String NOTIF_DISMISSED_ACTION = "com.aioapp.mdm.NOTIF_DISMISSED";
 
     private AlarmManager alarmManager;
     private PendingIntent pollIntent;
@@ -120,6 +122,10 @@ public class MdmService extends Service {
     private volatile JSONArray cachedInstalledApps = null;  // invalidated from a package-change receiver thread
     private BroadcastReceiver packageChangeReceiver;
     private String lastNotificationText = "";
+    // Shown as the notification's subtext. Resolved once: the PackageManager lookup is a
+    // binder call and the version cannot change while this process lives.
+    private String notificationVersion = "";
+    private BroadcastReceiver notifDismissReceiver;
     // Control-plane pool: short tasks (check-ins, telemetry, acks, config, input, pings).
     private ExecutorService executor;
     // Heavy pool: long-running ops (commands, logcat, OTA download, screen capture) so they
@@ -281,6 +287,7 @@ public class MdmService extends Service {
         // makes synchronous DPM binder calls that can stall past 5s on a cold fleet boot, so
         // promote to foreground FIRST, then do provisioning.
         createNotificationChannel();
+        notificationVersion = clientVersionName();
         startForeground(NOTIFICATION_ID, buildNotification("Your device is set up and protected"));
         // Kiosk needs the active admin, never Device Owner — KioskManager claims and releases the
         // admin with the kiosk config itself.
@@ -368,6 +375,22 @@ public class MdmService extends Service {
             }
         };
         registerReceiver(pollReceiver, new IntentFilter(POLL_ACTION), Context.RECEIVER_NOT_EXPORTED);
+        // A14 decides dismissibility itself: NotificationManagerService.fixNotification() keeps
+        // FLAG_NO_DISMISS only for media/CallStyle notifications or an "enterprise exempted" app
+        // (Device Owner/Profile Owner, or the OP_SYSTEM_EXEMPT_FROM_DISMISSIBLE_NOTIFICATIONS
+        // appop — which it refuses outright for uid SYSTEM, which is us). We hold the active
+        // admin only while kiosked and never Device Owner, so FLAG_NO_CLEAR is stripped and the
+        // status line can be swiped away. Re-post it the moment that happens; the periodic
+        // ensureStatusNotification() on check-in is only the slow backstop.
+        notifDismissReceiver = new BroadcastReceiver() {
+            @Override public void onReceive(Context context, Intent intent) {
+                Log.i(TAG, "status notification dismissed — re-posting");
+                getSystemService(NotificationManager.class)
+                        .notify(NOTIFICATION_ID, buildNotification(currentStatusText()));
+            }
+        };
+        registerReceiver(notifDismissReceiver, new IntentFilter(NOTIF_DISMISSED_ACTION),
+                Context.RECEIVER_NOT_EXPORTED);
         pollIntent = PendingIntent.getBroadcast(this, 0,
                 new Intent(POLL_ACTION).setPackage(getPackageName()), PendingIntent.FLAG_IMMUTABLE);
 
@@ -562,6 +585,7 @@ public class MdmService extends Service {
 
     private void performCheckin() {
         long now = System.currentTimeMillis();
+        ensureStatusNotification();
         if (wsClient != null && wsClient.isConnected()) {
             // Liveness is gauged by data *received* (server keepalive pings every ~45s), not by
             // how often we send — with change-gated telemetry a healthy link can be quiet.
@@ -3177,6 +3201,30 @@ public class MdmService extends Service {
         getSystemService(NotificationManager.class).notify(NOTIFICATION_ID, buildNotification(text));
     }
 
+    /**
+     * Re-posts the persistent status notification if it is no longer showing. setOngoing +
+     * FLAG_NO_CLEAR stop a swipe, but nothing stops the notification being lost another way
+     * (channel recreated, a restart that didn't re-enter startForeground); this makes the
+     * status line self-healing on every check-in instead of only at service start.
+     */
+    /** The status line the notification should be showing right now. */
+    private String currentStatusText() {
+        return lastNotificationText.isEmpty() ? "Your device is set up and protected"
+                                              : lastNotificationText;
+    }
+
+    private void ensureStatusNotification() {
+        try {
+            NotificationManager nm = getSystemService(NotificationManager.class);
+            for (android.service.notification.StatusBarNotification sbn : nm.getActiveNotifications()) {
+                if (sbn.getId() == NOTIFICATION_ID) return;
+            }
+            nm.notify(NOTIFICATION_ID, buildNotification(currentStatusText()));
+        } catch (Exception e) {
+            Log.w(TAG, "ensureStatusNotification failed: " + e.getMessage());
+        }
+    }
+
     private void createNotificationChannel() {
         NotificationManager nm = getSystemService(NotificationManager.class);
         // Persistent status: silent, low-importance, no badge.
@@ -3197,9 +3245,17 @@ public class MdmService extends Service {
         Notification n = new Notification.Builder(this, CHANNEL_ID)
                 .setContentTitle("AIO MDM")
                 .setContentText(text)
+                // Which client build this device runs — the first thing asked in the field,
+                // and since 1.0.0 it can differ from the firmware the device shipped with.
+                .setSubText(notificationVersion.isEmpty() ? null : "v" + notificationVersion)
+                .setShowWhen(false)
                 .setSmallIcon(R.drawable.ic_notify_shield)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
+                // Swipe → this fires → we post it straight back (see NOTIF_DISMISSED_ACTION).
+                .setDeleteIntent(PendingIntent.getBroadcast(this, 0,
+                        new Intent(NOTIF_DISMISSED_ACTION).setPackage(getPackageName()),
+                        PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT))
                 .build();
         // Keep the persistent status non-dismissible — setOngoing alone lets the user
         // swipe a foreground-service notification away on modern Android.
@@ -3236,6 +3292,7 @@ public class MdmService extends Service {
         alarmManager.cancel(pollIntent);
         if (pollReceiver != null) {
             try { unregisterReceiver(pollReceiver); } catch (Exception ignored) {}
+            try { unregisterReceiver(notifDismissReceiver); } catch (Exception ignored) {}
         }
         executor.shutdownNow();
         if (heavyExecutor != null) heavyExecutor.shutdownNow();
