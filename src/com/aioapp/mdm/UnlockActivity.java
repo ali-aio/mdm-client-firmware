@@ -21,10 +21,10 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 /**
- * The offline kiosk-exit prompt: a technician enters the current rotating code to leave
- * kiosk lock mode with no server connection. Unused — the nav-bar gesture (long-press Back
- * + Power) exits directly via {@link MdmService#armKioskExit}, no code entry. Deliberately
- * unbranded.
+ * The offline kiosk-exit prompt: a technician enters the static exit PIN (or the rotating
+ * TOTP code) to leave kiosk lock mode with no server connection. Opened by five Power
+ * presses inside 10s — see MdmService.recordPowerPress, which is the exit path on QCOM
+ * images, where the SystemUI long-press-Back arm does not exist. Deliberately unbranded.
  */
 public class UnlockActivity extends Activity {
     private static final String TAG = "UnlockActivity";
@@ -98,7 +98,7 @@ public class UnlockActivity extends Activity {
         card.addView(title);
 
         TextView sub = new TextView(this);
-        sub.setText("Enter the current unlock code to leave kiosk.");
+        sub.setText("Enter the exit PIN or the current unlock code.");
         sub.setTextColor(C_SUB);
         sub.setTextSize(13.5f);
         sub.setPadding(0, dp(4), 0, dp(18));
@@ -184,7 +184,7 @@ public class UnlockActivity extends Activity {
             codeInput.setText("");
             status.setText(KioskExit.isLockedOut(this)
                     ? "Locked for " + (KioskExit.lockoutRemainingMs(this) / 1000 + 1) + "s."
-                    : "Incorrect code. Try again.");
+                    : "Incorrect PIN. Try again.");
             return;
         }
         try {

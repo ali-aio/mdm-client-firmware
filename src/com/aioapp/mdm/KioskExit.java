@@ -28,6 +28,14 @@ public final class KioskExit {
     private static final String K_FAILS     = "fail_count";
     private static final String K_LOCKOUT   = "lockout_until_ms";
     private static final String K_EVENT_AT  = "exit_event_at"; // epoch secs, 0 = none pending
+    private static final String K_PIN       = "pin";        // static exit PIN (server-pushed)
+
+    /**
+     * Static exit PIN used until the server pushes one in offline_exit.pin. The TOTP path
+     * needs the dashboard, which is exactly what a technician standing at an offline device
+     * does not have; this PIN is what the power-press exit prompt accepts.
+     */
+    private static final String DEFAULT_PIN = "147147";
 
     private static final int MAX_FAILS = 5;
     private static final long LOCKOUT_MS = 60_000L; // 60s cool-off after MAX_FAILS
@@ -52,13 +60,18 @@ public final class KioskExit {
         e.putInt(K_PERIOD, offline.optInt("period", 60));
         String seed = offline.optString("seed", "");
         if (!seed.isEmpty()) e.putString(K_SEED, seed);
+        String pin = offline.optString("pin", "");
+        if (!pin.isEmpty()) e.putString(K_PIN, pin);
         e.apply();
         Log.i(TAG, "offline-exit seed provisioned=" + seedSet(ctx));
     }
 
-    /** Offline exit is usable once a seed is provisioned (only reachable while in kiosk). */
+    /**
+     * Offline exit is usable once a seed is provisioned — or always, since the PIN path
+     * falls back to DEFAULT_PIN and needs no provisioning at all.
+     */
     public static boolean isEnabled(Context ctx) {
-        return seedSet(ctx);
+        return seedSet(ctx) || !pin(ctx).isEmpty();
     }
 
     public static boolean seedSet(Context ctx) {
@@ -66,6 +79,8 @@ public final class KioskExit {
     }
 
     private static String seed(Context ctx)   { return prefs(ctx).getString(K_SEED, ""); }
+    /** The server-pushed PIN, or the compiled-in default when none has been pushed. */
+    private static String pin(Context ctx)    { return prefs(ctx).getString(K_PIN, DEFAULT_PIN); }
     private static int digits(Context ctx)    { return prefs(ctx).getInt(K_DIGITS, 6); }
     private static int period(Context ctx)    { return prefs(ctx).getInt(K_PERIOD, 60); }
 
@@ -83,11 +98,17 @@ public final class KioskExit {
         return Math.max(0, prefs(ctx).getLong(K_LOCKOUT, 0) - System.currentTimeMillis());
     }
 
-    /** Verify a code; on success clears failures and returns true. Rate-limited. */
+    /**
+     * Verify an entered code; on success clears failures and returns true. Rate-limited.
+     * Accepts either the static exit PIN or the rotating TOTP code — a technician with the
+     * dashboard open and one standing at a dead-offline device both get in.
+     */
     public static boolean verify(Context ctx, String code) {
         if (isLockedOut(ctx)) return false;
-        boolean ok = Totp.verify(seed(ctx), code, System.currentTimeMillis() / 1000L,
-                digits(ctx), period(ctx));
+        String expectedPin = pin(ctx);
+        boolean ok = (!expectedPin.isEmpty() && expectedPin.equals(code))
+                || (seedSet(ctx) && Totp.verify(seed(ctx), code, System.currentTimeMillis() / 1000L,
+                        digits(ctx), period(ctx)));
         SharedPreferences p = prefs(ctx);
         if (ok) {
             p.edit().putInt(K_FAILS, 0).putLong(K_LOCKOUT, 0).apply();

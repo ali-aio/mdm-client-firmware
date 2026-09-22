@@ -62,6 +62,18 @@ public class MdmService extends Service {
     // unchanged — worked on a fresh flash, silently never armed after an OTA. A Settings.Secure
     // write needs no permission grant between the two apps at all.
     public static final String KIOSK_EXIT_ARM_SETTING = "aioapp_kiosk_exit_arm_at";
+    // Power-press kiosk exit: the long-press-Back arm above needs a SystemUI patch that only
+    // ever landed in the GMS tree, so on QCOM images nothing writes KIOSK_EXIT_ARM_SETTING and
+    // the gesture can't arm at all. This path is pure client: each Power press toggles the
+    // display, and every toggle broadcasts ACTION_SCREEN_ON/OFF, so counting those edges
+    // counts the presses. POWER_EXIT_PRESSES within POWER_EXIT_WINDOW_MS opens the PIN prompt
+    // — it prompts rather than exiting outright, because a screen toggle is something a user
+    // can also produce by accident.
+    private static final int POWER_EXIT_PRESSES = 5;
+    private static final long POWER_EXIT_WINDOW_MS = 10_000L;
+    private final long[] powerPressTimes = new long[POWER_EXIT_PRESSES];
+    private int powerPressIdx = 0;
+    private BroadcastReceiver screenOnReceiver;
     private static final long KIOSK_EXIT_ARM_WINDOW_MS = 4000;
     private volatile long kioskExitArmedUntilMs = 0;
     private BroadcastReceiver screenOffReceiver;
@@ -356,6 +368,18 @@ public class MdmService extends Service {
         };
         registerReceiver(screenOffReceiver, new IntentFilter(Intent.ACTION_SCREEN_OFF));
 
+        // Both edges count as one press: Power with the screen on gives SCREEN_OFF, Power
+        // with it off gives SCREEN_ON.
+        screenOnReceiver = new BroadcastReceiver() {
+            @Override public void onReceive(Context context, Intent intent) {
+                recordPowerPress();
+            }
+        };
+        IntentFilter powerFilter = new IntentFilter();
+        powerFilter.addAction(Intent.ACTION_SCREEN_ON);
+        powerFilter.addAction(Intent.ACTION_SCREEN_OFF);
+        registerReceiver(screenOnReceiver, powerFilter);
+
         // Kiosk-exit arm request from the long-press-Back gesture (SystemUI writes the
         // Settings.Secure key on every long-press; any write — even the same value — fires
         // onChange, so no need to inspect the new value here).
@@ -465,6 +489,36 @@ public class MdmService extends Service {
         }
         kioskExitArmedUntilMs = SystemClock.elapsedRealtime() + KIOSK_EXIT_ARM_WINDOW_MS;
         Log.i(TAG, "kiosk-exit armed for " + KIOSK_EXIT_ARM_WINDOW_MS + "ms — press Power to exit");
+    }
+
+    /**
+     * One display toggle — i.e. one Power press. When POWER_EXIT_PRESSES of them land inside
+     * POWER_EXIT_WINDOW_MS while the device is kiosked, show the PIN prompt.
+     */
+    private void recordPowerPress() {
+        if (!isInKioskLock() || !KioskExit.isEnabled(this)) return;
+        long now = SystemClock.elapsedRealtime();
+        powerPressTimes[powerPressIdx] = now;
+        powerPressIdx = (powerPressIdx + 1) % POWER_EXIT_PRESSES;
+        // The ring holds the last POWER_EXIT_PRESSES presses; the oldest of them being inside
+        // the window means all of them are.
+        long oldest = powerPressTimes[powerPressIdx];
+        if (oldest == 0 || now - oldest > POWER_EXIT_WINDOW_MS) return;
+        java.util.Arrays.fill(powerPressTimes, 0L);  // consume, so the prompt opens once
+        Log.i(TAG, "kiosk-exit: " + POWER_EXIT_PRESSES + " power presses — opening PIN prompt");
+        showUnlockPrompt();
+    }
+
+    /** Wakes the screen (the last press may have turned it off) and shows UnlockActivity. */
+    private void showUnlockPrompt() {
+        try {
+            wakeScreen(null);
+            Intent i = new Intent(this, UnlockActivity.class);
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+            startActivity(i);
+        } catch (Exception e) {
+            Log.e(TAG, "showUnlockPrompt failed: " + e.getMessage());
+        }
     }
 
     /** Confirmed exit (armed Back + Power). Leaves kiosk locally and reports it on the
@@ -3313,6 +3367,7 @@ public class MdmService extends Service {
         }
         if (screenOffReceiver != null) {
             try { unregisterReceiver(screenOffReceiver); } catch (Exception ignored) {}
+            try { unregisterReceiver(screenOnReceiver); } catch (Exception ignored) {}
         }
         if (kioskExitArmObserver != null) {
             try { getContentResolver().unregisterContentObserver(kioskExitArmObserver); } catch (Exception ignored) {}
