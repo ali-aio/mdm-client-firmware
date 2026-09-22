@@ -36,6 +36,20 @@ final class ClientUpdater {
     private static final String TAG = "MdmClient";
     private static final String PREFS = "mdm_client_update";
     private static final String KEY_PENDING = "pending";
+    /**
+     * This app's package, named rather than asked for: running under the system shared uid,
+     * getPackageName() can resolve to the framework's own "android" package, whose version
+     * (35 on A15) is not ours — the same trap MdmService.SELF_PACKAGE documents. Reading the
+     * wrong package here decides whether an update is a downgrade and whether it landed.
+     */
+    private static final String SELF_PACKAGE = "com.aioapp.mdm";
+    /**
+     * How long a recorded self-update may sit unsettled before the running build declares it
+     * failed. The install replaces this process within seconds when it works; anything still
+     * pending after this never installed, and without the sweep the command hangs at
+     * "installing" until the service happens to restart.
+     */
+    static final long PENDING_STALE_MS = 5 * 60 * 1000L;
 
     private ClientUpdater() {}
 
@@ -70,12 +84,12 @@ final class ClientUpdater {
         PackageInfo fresh = pm.getPackageArchiveInfo(apk.getAbsolutePath(),
                 PackageManager.GET_SIGNING_CERTIFICATES);
         if (fresh == null) return "not a valid APK";
-        if (!ctx.getPackageName().equals(fresh.packageName)) {
-            return "APK is " + fresh.packageName + ", not this client (" + ctx.getPackageName() + ")";
+        if (!SELF_PACKAGE.equals(fresh.packageName)) {
+            return "APK is " + fresh.packageName + ", not this client (" + SELF_PACKAGE + ")";
         }
         PackageInfo cur;
         try {
-            cur = pm.getPackageInfo(ctx.getPackageName(), PackageManager.GET_SIGNING_CERTIFICATES);
+            cur = pm.getPackageInfo(SELF_PACKAGE, PackageManager.GET_SIGNING_CERTIFICATES);
         } catch (Exception e) {
             return "could not read the installed version: " + e.getMessage();
         }
@@ -99,7 +113,8 @@ final class ClientUpdater {
         PackageInfo fresh = ctx.getPackageManager().getPackageArchiveInfo(apk.getAbsolutePath(), 0);
         long target = fresh == null ? 0 : versionCode(fresh);
         String name = fresh == null || fresh.versionName == null ? "" : fresh.versionName;
-        prefs(ctx).edit().putString(KEY_PENDING, cmdId + "|" + target + "|" + name).apply();
+        prefs(ctx).edit().putString(KEY_PENDING,
+                cmdId + "|" + target + "|" + name + "|" + System.currentTimeMillis()).apply();
         Log.i(TAG, "self-update " + cmdId + " -> " + name + " (" + target + ")");
     }
 
@@ -129,7 +144,7 @@ final class ClientUpdater {
         String name = parts.length > 2 ? parts[2] : "";
         long now = 0;
         try {
-            now = versionCode(ctx.getPackageManager().getPackageInfo(ctx.getPackageName(), 0));
+            now = versionCode(ctx.getPackageManager().getPackageInfo(SELF_PACKAGE, 0));
         } catch (Exception ignored) {}
         clearPending(ctx);
         if (now >= target) {
@@ -138,6 +153,48 @@ final class ClientUpdater {
         } else {
             settler.settle(cmdId, "failed", "still running " + now + " after installing " + target);
         }
+    }
+
+    /**
+     * The version code this client is actually running (0 when it cannot be read). Used to
+     * decide whether an install landed — "is the package present?" is meaningless for a
+     * self-update, because the build asking the question IS that package.
+     */
+    static long installedVersionCode(Context ctx) {
+        try {
+            return versionCode(ctx.getPackageManager().getPackageInfo(SELF_PACKAGE, 0));
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+
+    /**
+     * Called periodically (not just at startup): a self-update recorded more than
+     * PENDING_STALE_MS ago, with this process still running a build below the target, never
+     * installed. Settle it as failed so the operator sees a result instead of a row stuck at
+     * "installing" — the install path cannot report this itself, since a successful install
+     * ends the process and an unsuccessful one leaves no callback behind.
+     */
+    static void sweepStalePending(Context ctx, Settler settler) {
+        String pending = prefs(ctx).getString(KEY_PENDING, "");
+        if (pending == null || pending.isEmpty()) return;
+        String[] parts = pending.split("\\|", -1);
+        if (parts.length < 4) return;   // pre-1.3.2 record, no timestamp: left to settlePending
+        String cmdId = parts[0];
+        long target = 0, at = 0;
+        try {
+            target = Long.parseLong(parts[1]);
+            at = Long.parseLong(parts[3]);
+        } catch (NumberFormatException ignored) {}
+        if (cmdId.isEmpty() || at == 0) return;
+        if (System.currentTimeMillis() - at < PENDING_STALE_MS) return;
+        long now = installedVersionCode(ctx);
+        if (now >= target) return;      // it did land; settlePending will report it
+        clearPending(ctx);
+        Log.w(TAG, "self-update " + cmdId + " never installed (still " + now + ", wanted "
+                + target + ") — reporting failed");
+        settler.settle(cmdId, "failed", "update did not install — still running " + now
+                + " after " + (PENDING_STALE_MS / 60000) + " min (wanted " + target + ")");
     }
 
     /** How the settled result gets back to the server (MdmService's terminal ack). */

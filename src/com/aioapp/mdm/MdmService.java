@@ -640,6 +640,10 @@ public class MdmService extends Service {
     private void performCheckin() {
         long now = System.currentTimeMillis();
         ensureStatusNotification();
+        // A self-update that never installed: report it rather than leaving the command at
+        // "installing" until this service happens to restart.
+        ClientUpdater.sweepStalePending(this,
+                (cmdId, status, output) -> reportTerminal(cmdId, getDeviceSerial(), status, output));
         if (wsClient != null && wsClient.isConnected()) {
             // Liveness is gauged by data *received* (server keepalive pings every ~45s), not by
             // how often we send — with change-gated telemetry a healthy link can be quiet.
@@ -2239,6 +2243,29 @@ public class MdmService extends Service {
 
             // Fallback: the package may be present even if the callback reported failure
             // or never fired (USER_ACTION_NOT_REQUIRED installs sometimes don't broadcast).
+            //
+            // For a SELF-update "is the package present?" is always true — the build asking
+            // is that package — so presence alone declared every failed self-install a
+            // success: installApk returned "", app_update sent no ack (the replacement build
+            // is meant to settle it), no replacement ever started, and the command sat at
+            // "installing" forever. Compare version codes instead.
+            if (selfUpdate) {
+                long installed = ClientUpdater.installedVersionCode(this);
+                long wanted = apkInfo != null ? (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
+                        ? apkInfo.getLongVersionCode() : apkInfo.versionCode) : 0;
+                if (wanted > 0 && installed >= wanted) {
+                    Log.i(TAG, "self-update landed (running " + installed + ")");
+                    return "";
+                }
+                ClientUpdater.clearPending(this);
+                String why = failReason.get();
+                if (why.isEmpty()) {
+                    why = completed ? "install reported no result"
+                                    : "install timed out after 180s (no result)";
+                }
+                Log.e(TAG, "self-update did not install: " + why + " (still running " + installed + ")");
+                return why + " — still running " + installed + ", wanted " + wanted;
+            }
             if (apkPackageName != null) {
                 try {
                     getPackageManager().getPackageInfo(apkPackageName, 0);
