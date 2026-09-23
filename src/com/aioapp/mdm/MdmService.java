@@ -2710,7 +2710,14 @@ public class MdmService extends Service {
             // Posture: a change (adb switched on, a new accessibility service) is sent at
             // once rather than waiting for the next keyframe.
             "adb_enabled", "adb_tcp", "dev_options_enabled", "unknown_sources",
-            "unknown_source_apps", "su_present", "accessibility_services", "play_protect"
+            "unknown_source_apps", "su_present", "accessibility_services", "play_protect",
+            // Kiosk exited on the device with the PIN, and the timestamp the server acks
+            // to clear it. Neither was volatile nor gated, so a flip did not even wake a
+            // delta send: the exit reached the server on the next keyframe at best, and
+            // the dashboard showed kiosk on over an unlocked device until then. Gated,
+            // the flip itself now forces a frame that carries both. (A frame lost in
+            // flight is recovered server-side from latest_extra — processOfflineExit.)
+            "kiosk_suspended", "offline_exit_at"
     };
     private static final String[] VOLATILE_EXTRA_KEYS = {
             "battery_temp_c", "ram_usage_mb", "uptime_seconds", "wifi_rssi", "ota_progress",
