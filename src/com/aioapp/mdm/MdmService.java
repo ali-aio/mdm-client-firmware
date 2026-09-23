@@ -268,6 +268,9 @@ public class MdmService extends Service {
     private int lastSentBattery = Integer.MIN_VALUE;  // guarded by baselineLock
     private volatile boolean forceKeyframe = true;
 
+    /** Sent by UnlockActivity after a verified PIN exit, to report the new state at once. */
+    public static final String ACTION_KIOSK_EXITED = "com.aioapp.mdm.action.KIOSK_EXITED";
+
     // Connection health
     private static final long HTTP_SAFETY_NET_MS = 5 * 60_000L;
     private static final long STALE_WS_THRESHOLD_SECS = 120;
@@ -452,6 +455,17 @@ public class MdmService extends Service {
         // Cancel any existing alarm before rescheduling — prevents duplicates when
         // LOCKED_BOOT_COMPLETED + BOOT_COMPLETED both fire on a fresh boot.
         alarmManager.cancel(pollIntent);
+        // A technician who exits kiosk with the static PIN does it from UnlockActivity,
+        // which is a separate process-less activity with no handle on this service — so
+        // the exit used to reach the server only on the next scheduled poll, and the
+        // dashboard kept saying "Kiosk on" over an unlocked device for minutes. The
+        // activity starts us with this action instead, and it reports at once, exactly
+        // like the Back+Power gesture path does.
+        if (intent != null && ACTION_KIOSK_EXITED.equals(intent.getAction())) {
+            Log.i(TAG, "kiosk exited via unlock PIN — pushing immediate telemetry");
+            forceKeyframe = true;
+            sendTelemetryOverWs();
+        }
         if (networkAvailable && !polling) performCheckin();
         enforceKioskLock(); // self-heal: re-assert lock-task if it has dropped
         scheduleNextPoll();

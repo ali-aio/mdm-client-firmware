@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.app.admin.DevicePolicyManager;
 import android.content.ComponentName;
 import android.content.Context;
+import android.content.Intent;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
@@ -280,6 +281,16 @@ public class UnlockActivity extends Activity {
             KioskManager.suspendLocally(this, dpm, admin);
         } catch (Exception e) {
             Log.e(TAG, "suspendLocally error: " + e.getMessage());
+        }
+        // Tell the service to report the exit now. Without this the suspension only rode
+        // the next scheduled check-in, so the dashboard showed the device as locked long
+        // after the technician had unlocked it in front of the customer.
+        try {
+            Intent report = new Intent(this, MdmService.class);
+            report.setAction(MdmService.ACTION_KIOSK_EXITED);
+            startService(report);
+        } catch (Exception e) {
+            Log.e(TAG, "exit report error: " + e.getMessage());
         }
         Toast.makeText(this, "Kiosk mode exited", Toast.LENGTH_LONG).show();
         finish();
