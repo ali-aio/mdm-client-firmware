@@ -172,6 +172,12 @@ public class MdmService extends Service {
     // never occupy the control-plane pool and starve/drop a telemetry or ack task.
     private ExecutorService heavyExecutor;
     private String deviceSerial;  // cached; Build.getSerial() is a binder call and never changes
+    private String serialRaw;             // what Build.getSerial() actually returned
+    private boolean serialCorrupt = false; // true when deviceSerial is msm-<ANDROID_ID> instead
+    // A device serial is letters and digits (AT070AABU00429). Anything else — '=', '.',
+    // spaces — is a fragment of the boot command line, not a serial.
+    private static final java.util.regex.Pattern VALID_SERIAL =
+            java.util.regex.Pattern.compile("^[A-Za-z0-9]{4,32}$");
     // Cached reflected SurfaceControl.screenshot — looked up once, not per capture frame.
     private volatile java.lang.reflect.Method screenshotMethod;
     private volatile boolean screenshotMethodResolved;
@@ -2551,6 +2557,13 @@ public class MdmService extends Service {
         extra.put("agent_package", SELF_PACKAGE);
         extra.put("agent_version", clientVersionName());
         extra.put("agent_version_code", clientVersionCode());
+        // A device identifying as msm-<ANDROID_ID> because its serial read corrupt says so,
+        // with what the serial actually read, so the fleet can list it as such.
+        getDeviceSerial();
+        if (serialCorrupt) {
+            extra.put("serial_corrupt", true);
+            extra.put("serial_raw", serialRaw != null ? serialRaw : "");
+        }
         // Which platform key signed this image: user builds carry release-keys, userdebug
         // test-keys. An update APK must be signed with the same one, so the server needs
         // this to hand the device the right build.
@@ -2866,10 +2879,27 @@ public class MdmService extends Service {
 
     private String getDeviceSerial() {
         if (deviceSerial == null) {
+            String raw;
             try {
-                deviceSerial = Build.getSerial();
+                raw = Build.getSerial();
             } catch (SecurityException e) {
-                deviceSerial = Build.UNKNOWN;
+                raw = Build.UNKNOWN;
+            }
+            serialRaw = raw;
+            if (raw != null && VALID_SERIAL.matcher(raw).matches()) {
+                deviceSerial = raw;
+            } else {
+                // A corrupted bootloader hands the kernel a command line with no serial on
+                // it, and ro.serialno picks up the next token instead — the fleet has seen
+                // "androidboot.baseband=msm". Every tablet in that state then reported the
+                // same "serial", and the server merged them into one device (19 boots and
+                // 29 IP addresses taking turns on one record). ANDROID_ID is per device
+                // and survives reboots, so msm-<ANDROID_ID> keeps each one apart; the server
+                // shows these as corrupted-serial devices and refuses the raw value.
+                String androidId = Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID);
+                deviceSerial = "msm-" + (androidId != null && !androidId.isEmpty() ? androidId : "unknown");
+                serialCorrupt = true;
+                Log.w(TAG, "Serial \"" + raw + "\" is not a device serial; identifying as " + deviceSerial);
             }
         }
         return deviceSerial;
