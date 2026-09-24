@@ -183,6 +183,22 @@ public class MdmService extends Service {
     // Edge-detect charging state so we only push telemetry on plug/unplug
     // transitions (ACTION_BATTERY_CHANGED fires on every level change too).
     private volatile int lastChargingState = -1; // -1 unknown, 0 not charging, 1 charging
+    private volatile String lastChargerType = null;
+    // A charger toggling every second or two is debounced into one flap (see ChargerFlap):
+    // no frame per toggle, one when the flap starts and one when it settles.
+    private final ChargerFlap chargerFlap = new ChargerFlap();
+    private final Handler flapHandler = new Handler(Looper.getMainLooper());
+    private final Runnable flapSettleCheck = new Runnable() {
+        @Override public void run() {
+            if (chargerFlap.settle(SystemClock.elapsedRealtime())) {
+                Log.i(TAG, "Charger flap settled — pushing the settled state");
+                synchronized (wlcLock) { wlcLastMs = 0; }
+                sendTelemetryOverWs();
+            } else if (chargerFlap.isFlapping()) {
+                flapHandler.postDelayed(this, ChargerFlap.SETTLE_MS);
+            }
+        }
+    };
 
     // Wi-Fi disconnect tracking: edge-detect connected→disconnected and keep the last
     // hour of event timestamps (elapsedRealtime millis) so getWifiDisconnects1h() is O(n).
@@ -361,15 +377,31 @@ public class MdmService extends Service {
             @Override public void onReceive(Context context, Intent intent) {
                 cachedBatteryIntent = intent;
                 int charging = extractCharging(intent) ? 1 : 0;
+                String chargerType = extractChargerType(intent);
                 if (lastChargingState != -1 && charging != lastChargingState) {
-                    Log.i(TAG, "Charging state changed: " + lastChargingState + " -> " + charging
-                            + " — pushing immediate telemetry");
-                    // A power transition can change what the pad reports; drop the wlc cache
-                    // so the imminent push carries a fresh reading rather than a stale one.
-                    synchronized (wlcLock) { wlcLastMs = 0; }
-                    sendTelemetryOverWs();
+                    boolean started = chargerFlap.onFlip(SystemClock.elapsedRealtime(),
+                            lastChargingState == 1, lastChargerType);
+                    if (chargerFlap.isFlapping()) {
+                        // Flapping: the reported state is held, so a push per toggle would
+                        // carry nothing new. Say it once, and again when it settles.
+                        if (started) {
+                            Log.w(TAG, "Charger flapping (" + ChargerFlap.ENTER_FLIPS + "+ toggles in "
+                                    + (ChargerFlap.WINDOW_MS / 1000) + "s) — holding charging state");
+                            sendTelemetryOverWs();
+                        }
+                        flapHandler.removeCallbacks(flapSettleCheck);
+                        flapHandler.postDelayed(flapSettleCheck, ChargerFlap.SETTLE_MS);
+                    } else {
+                        Log.i(TAG, "Charging state changed: " + lastChargingState + " -> " + charging
+                                + " — pushing immediate telemetry");
+                        // A power transition can change what the pad reports; drop the wlc cache
+                        // so the imminent push carries a fresh reading rather than a stale one.
+                        synchronized (wlcLock) { wlcLastMs = 0; }
+                        sendTelemetryOverWs();
+                    }
                 }
                 lastChargingState = charging;
+                lastChargerType = chargerType;
             }
         };
         cachedBatteryIntent = registerReceiver(batteryReceiver,
@@ -2565,9 +2597,16 @@ public class MdmService extends Service {
         // charger input. A wall-powered kiosk has none, so these are omitted rather than
         // reported as a permanent "not charging".
         if (product.hasCharging()) {
-            extra.put("charging", extractCharging(batteryIntent));
+            // While the charger flaps, charging and charger_type hold the values they had
+            // going in and charger_flapping says why — the server stores the flap as one
+            // state instead of a row per toggle. Both flap keys are always present, so a
+            // delta can clear them (a key that just disappears cannot be merged away).
+            boolean flapping = chargerFlap.isFlapping();
+            extra.put("charging", flapping ? chargerFlap.heldCharging() : extractCharging(batteryIntent));
             extra.put("charger_voltage_mv", extractChargerVoltage(batteryIntent));
-            extra.put("charger_type", extractChargerType(batteryIntent));
+            extra.put("charger_type", flapping ? chargerFlap.heldType() : extractChargerType(batteryIntent));
+            extra.put("charger_flapping", flapping);
+            extra.put("charger_flaps_5m", chargerFlap.flipsIn5m(SystemClock.elapsedRealtime()));
         }
         // Whether the pack is actually there, on a product that is supposed to have one.
         // The T7's charger IC infers presence from the NTC (thermistor) fault bits rather
@@ -2742,13 +2781,18 @@ public class MdmService extends Service {
             // the dashboard showed kiosk on over an unlocked device until then. Gated,
             // the flip itself now forces a frame that carries both. (A frame lost in
             // flight is recovered server-side from latest_extra — processOfflineExit.)
-            "kiosk_suspended", "offline_exit_at"
+            "kiosk_suspended", "offline_exit_at",
+            // A flap starting or settling is one frame; the toggles inside it are none.
+            "charger_flapping"
     };
     private static final String[] VOLATILE_EXTRA_KEYS = {
             "battery_temp_c", "ram_usage_mb", "uptime_seconds", "wifi_rssi", "ota_progress",
             // Always carried in any frame we send: charger voltage moves continuously, and
             // crash/disconnect signals must never be dropped waiting for a gated change.
-            "charger_voltage_mv", "wifi_disconnects_1h", "crash_events"
+            "charger_voltage_mv", "wifi_disconnects_1h", "crash_events",
+            // The flap rate rides along for the server's faulty-charger alert; it moves on
+            // every toggle, so it must never be what causes a frame.
+            "charger_flaps_5m"
     };
 
     /** Delta payload: the volatile set + any changed gated fields; battery_pct only if changed. */
@@ -3527,6 +3571,7 @@ public class MdmService extends Service {
             try { unregisterReceiver(pollReceiver); } catch (Exception ignored) {}
             try { unregisterReceiver(notifDismissReceiver); } catch (Exception ignored) {}
         }
+        flapHandler.removeCallbacks(flapSettleCheck);
         executor.shutdownNow();
         if (heavyExecutor != null) heavyExecutor.shutdownNow();
         if (wlcWatcher != null) wlcWatcher.shutdownNow();
