@@ -96,9 +96,23 @@ public class MdmService extends Service {
     private static final String PREFS_VERIFIER = "mdm_verifier";
     private static final String KEY_VERIFIER_SAVED = "saved_value";
 
+    // Also declared on WatchdogReceiver in the manifest, so a poll alarm that fires after the
+    // process died (e.g. a self-update whose restart failed) starts the service again.
     private static final String POLL_ACTION = "com.aioapp.mdm.POLL";
+    // Repeating backstop for the same thing, armed at startup and never cancelled: alarms
+    // survive a self-update's stop, so this keeps retrying even if the poll alarm's one try
+    // fails too. Inexact, so it batches with other wakeups.
+    private static final String WATCHDOG_ACTION = "com.aioapp.mdm.WATCHDOG";
+    private static final long WATCHDOG_INTERVAL_MS = AlarmManager.INTERVAL_FIFTEEN_MINUTES;
     // Fired as the status notification's deleteIntent — i.e. when the user swipes it away.
     private static final String NOTIF_DISMISSED_ACTION = "com.aioapp.mdm.NOTIF_DISMISSED";
+
+    private static volatile boolean running;
+
+    /** True while this process has a live MdmService; read by WatchdogReceiver. */
+    static boolean isRunning() {
+        return running;
+    }
 
     private AlarmManager alarmManager;
     private PendingIntent pollIntent;
@@ -285,6 +299,7 @@ public class MdmService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        running = true;
         // CallerRunsPolicy applies backpressure instead of silently discarding a queued
         // ack/telemetry task if the pool ever saturates. Long ops live on heavyExecutor.
         executor = new ThreadPoolExecutor(2, 4, 60, TimeUnit.SECONDS,
@@ -437,6 +452,7 @@ public class MdmService extends Service {
                 Context.RECEIVER_NOT_EXPORTED);
         pollIntent = PendingIntent.getBroadcast(this, 0,
                 new Intent(POLL_ACTION).setPackage(getPackageName()), PendingIntent.FLAG_IMMUTABLE);
+        armWatchdog();
 
         registerNetworkCallback();
         registerPackageChangeReceiver();
@@ -575,6 +591,15 @@ public class MdmService extends Service {
     private boolean isOnExternalPower() {
         Intent b = getBatteryIntent();
         return b != null && b.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0;
+    }
+
+    /** Arm (or re-arm — same PendingIntent replaces it) the repeating WatchdogReceiver alarm. */
+    private void armWatchdog() {
+        PendingIntent watchdog = PendingIntent.getBroadcast(this, 0,
+                new Intent(WATCHDOG_ACTION).setClass(this, WatchdogReceiver.class),
+                PendingIntent.FLAG_IMMUTABLE);
+        alarmManager.setInexactRepeating(AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                SystemClock.elapsedRealtime() + WATCHDOG_INTERVAL_MS, WATCHDOG_INTERVAL_MS, watchdog);
     }
 
     private void scheduleNextPoll() {
@@ -3493,6 +3518,7 @@ public class MdmService extends Service {
 
     @Override
     public void onDestroy() {
+        running = false;
         isCapturing = false;
         stopAllLogcatStreams();
         releaseRemoteWakeLock();
