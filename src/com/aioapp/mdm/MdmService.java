@@ -228,22 +228,20 @@ public class MdmService extends Service {
     private long ramLastMs = 0;
     private static final long RAM_CACHE_MS = 30_000;
 
-    // Reported (not raw) values for the readings that never sit still. The sensors jitter
-    // in their last digit — board temperature by tenths of a degree, charger voltage by a
-    // few mV — and every wobble used to travel as a fresh value and land as a stored
-    // history row. These hold what was last reported and only move once the reading has
-    // genuinely moved by the step below, so a value parked on a boundary cannot flap.
-    // Deliberately a deadband against the last REPORTED value rather than rounding to a
-    // grid: rounding still flips every time the reading crosses a grid line.
-    private float reportedTempC = SENTINEL_TEMP_C;
+    // Reported (not raw) charger voltage. It jitters by a few mV, and every wobble used to
+    // travel as a fresh value and land as a stored history row. This holds what was last
+    // reported and only moves once the reading has genuinely moved by the step below, so a
+    // value parked on a boundary cannot flap. Deliberately a deadband against the last
+    // REPORTED value rather than rounding to a grid: rounding still flips every time the
+    // reading crosses a grid line.
+    //
+    // Battery temperature is NOT held or smoothed (1.4.8): it is reported exactly as healthd
+    // gives it, the same value `dumpsys battery` shows, so the MDM and adb agree. The noise
+    // is fixed at its source, the battery-NTC ADC (hardware averaging in the device tree).
     private int reportedChargerMv = -1;
     private static final float SENTINEL_TEMP_C = -999f;
-    // Applied to the SMOOTHED temperature (TempSmoother): smoothing already removed the
-    // noise the old 1 °C step existed to hide, so a half degree is enough to stop flapping.
-    private static final float TEMP_STEP_C = 0.5f;
-    private final TempSmoother tempSmoother = new TempSmoother();
     private static final int CHARGER_STEP_MV = 50;      // the pack's own range spans ~45 mV
-    private final Object quantLock = new Object();      // guards the two reported values above
+    private final Object quantLock = new Object();      // guards the reported value above
 
     private int cachedWlcStatus = -1;
     private long wlcLastMs = 0;
@@ -385,11 +383,6 @@ public class MdmService extends Service {
         batteryReceiver = new BroadcastReceiver() {
             @Override public void onReceive(Context context, Intent intent) {
                 cachedBatteryIntent = intent;
-                // Every broadcast feeds the smoother, not only the ones a report reads.
-                if (intent.hasExtra(BatteryManager.EXTRA_TEMPERATURE)) {
-                    tempSmoother.add(SystemClock.elapsedRealtime(),
-                            intent.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) / 10.0);
-                }
                 int charging = extractCharging(intent) ? 1 : 0;
                 String chargerType = extractChargerType(intent);
                 if (lastChargingState != -1 && charging != lastChargingState) {
@@ -2858,9 +2851,8 @@ public class MdmService extends Service {
         double cur = curExtra.optDouble("battery_temp_c", -999);
         double prev = lastSentExtra.optDouble("battery_temp_c", -999);
         if (prev <= -999) return true;
-        // 1 °C of the smoothed reading, down from 2 °C of the raw one: smoothing took out
-        // the noise that made a smaller step send frames for nothing, and at 2 °C the
-        // dashboard sat on a stale temperature for 4–6 minutes at a time on battery.
+        // 1 °C, not the old 2 °C: at 2 °C the dashboard sat on a stale temperature for
+        // 4–6 minutes at a time on battery.
         if (Math.abs(cur - prev) >= 1.0) return true;
         return tempBand(cur) != tempBand(prev);
     }
@@ -2920,19 +2912,7 @@ public class MdmService extends Service {
     private float extractBatteryTemperature(Intent batteryStatus) {
         if (batteryStatus == null) return SENTINEL_TEMP_C;
         int tenths = batteryStatus.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0);
-        long now = SystemClock.elapsedRealtime();
-        tempSmoother.add(now, tenths / 10.0);
-        // The smoothed reading to one decimal, the resolution the sensor reports in.
-        float smoothed = Math.round(tempSmoother.read(now) * 10) / 10.0f;
-        synchronized (quantLock) {
-            // Hold the value, don't snap it to a grid: the dashboard still shows a true
-            // 31.4 °C, it just stops changing until the smoothed reading has actually
-            // moved. Snapping would re-introduce the boundary flapping this exists to remove.
-            if (reportedTempC == SENTINEL_TEMP_C || Math.abs(smoothed - reportedTempC) >= TEMP_STEP_C) {
-                reportedTempC = smoothed;
-            }
-            return reportedTempC;
-        }
+        return tenths / 10.0f;
     }
 
     private boolean extractCharging(Intent batteryStatus) {
