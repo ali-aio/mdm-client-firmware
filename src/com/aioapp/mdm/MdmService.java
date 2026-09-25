@@ -93,6 +93,10 @@ public class MdmService extends Service {
     // restores it. A framework fix (skip verification for installs initiated by this uid)
     // is the intended end state; this toggle goes away when that ships in the image.
     private static final String VERIFIER_SETTING = "package_verifier_enable";
+    // Wireless adb port, applied by the firmware's aio-adb-tcp.rc (see "adb_tcp"), and the
+    // wall-clock time it switches itself off again (0 = stays on until told otherwise).
+    private static final String ADB_TCP_PROP = "persist.sys.aio.adb_tcp_port";
+    private static final String ADB_TCP_UNTIL_PROP = "persist.sys.aio.adb_tcp_until";
     private static final String PREFS_VERIFIER = "mdm_verifier";
     private static final String KEY_VERIFIER_SAVED = "saved_value";
 
@@ -1605,6 +1609,47 @@ public class MdmService extends Service {
                 else reportTerminal(cmdId, serialNumber, "completed", mg.toString());
                 break;
             }
+            case "adb_tcp": {
+                // Wireless adb on (port) or off (0). We may only set persist.sys.*; the
+                // firmware's aio-adb-tcp.rc copies it to service.adb.tcp.port and restarts
+                // adbd, the same thing `adb tcpip` does. Persistent, so it survives the
+                // reboot an OTA test needs. Read back to report whether it took.
+                int port = payload.optInt("port", 5555);
+                if (port != 0 && (port < 1024 || port > 65535)) {
+                    reportTerminal(cmdId, serialNumber, "failed", "invalid port: " + port);
+                    break;
+                }
+                // Switches itself off after `hours` (default 24) unless hours=0 keeps it on.
+                int hours = Math.max(0, Math.min(24 * 30, payload.optInt("hours", 24)));
+                long until = port > 0 && hours > 0 ? System.currentTimeMillis() / 1000 + hours * 3600L : 0;
+                SystemPropertiesProxy.set(ADB_TCP_UNTIL_PROP, String.valueOf(until));
+                if (port > 0) {
+                    // adbd is only kept running while USB debugging is on.
+                    Settings.Global.putInt(getContentResolver(), Settings.Global.ADB_ENABLED, 1);
+                }
+                if (!SystemPropertiesProxy.set(ADB_TCP_PROP, String.valueOf(port))) {
+                    reportTerminal(cmdId, serialNumber, "failed", "could not set " + ADB_TCP_PROP);
+                    break;
+                }
+                String applied = "";
+                for (int i = 0; i < 20; i++) {  // init applies it within a few hundred ms
+                    applied = SystemPropertiesProxy.get("service.adb.tcp.port", "");
+                    if (String.valueOf(port).equals(applied)) break;
+                    SystemClock.sleep(100);
+                }
+                if (!String.valueOf(port).equals(applied)) {
+                    reportTerminal(cmdId, serialNumber, "failed",
+                            "firmware did not apply it (service.adb.tcp.port=" + applied
+                            + "): this image has no aio-adb-tcp.rc — needs v2.1.022+");
+                    break;
+                }
+                String ip = cachedWifiExtra != null ? cachedWifiExtra.optString("ip_address", "") : "";
+                reportTerminal(cmdId, serialNumber, "completed", port == 0
+                        ? "wireless adb off"
+                        : "wireless adb on " + (ip.isEmpty() || "null".equals(ip) ? "" : ip) + ":" + port
+                          + (until > 0 ? ", off after " + hours + " h" : ", stays on"));
+                break;
+            }
             case "reboot": {
                 // Server marks reboot commands completed at delivery — no ack needed
                 PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
@@ -2541,6 +2586,20 @@ public class MdmService extends Service {
     }
 
     /** Builds the current full telemetry "extra" — a complete snapshot of every field. */
+    /** Wireless adb switched on by "adb_tcp" goes off by itself once its time is up. */
+    private void expireAdbTcp() {
+        long until;
+        try {
+            until = Long.parseLong(SystemPropertiesProxy.get(ADB_TCP_UNTIL_PROP, "0"));
+        } catch (NumberFormatException e) {
+            return;
+        }
+        if (until <= 0 || System.currentTimeMillis() / 1000 < until) return;
+        Log.i(TAG, "wireless adb time is up, turning it off");
+        SystemPropertiesProxy.set(ADB_TCP_UNTIL_PROP, "0");
+        SystemPropertiesProxy.set(ADB_TCP_PROP, "0");
+    }
+
     private JSONObject buildExtra() throws JSONException {
         Intent batteryIntent = getBatteryIntent();
         JSONObject extra = new JSONObject();
@@ -2649,6 +2708,7 @@ public class MdmService extends Service {
         extra.put("crash_events", getRecentCrashEvents());
         // Security posture (adb, developer options, unknown sources, root, accessibility
         // services, Play Protect): the compliance rules' shared vocabulary across agents.
+        expireAdbTcp();
         try {
             SecurityPosture.put(MdmService.this, extra);
         } catch (Throwable t) {
