@@ -244,6 +244,36 @@ public class MdmService extends Service {
     // is fixed at its source, the battery-NTC ADC (hardware averaging in the device tree).
     private int reportedChargerMv = -1;
     private static final float SENTINEL_TEMP_C = -999f;
+
+    // Fast temperature (1.5.0): while the server's config carries temp_fast_sec > 0, a
+    // light tick every temp_fast_sec reads the cached battery broadcast and sends a frame
+    // when the temperature moved TEMP_FAST_STEP_C since the last one, or TEMP_FAST_HEARTBEAT_MS
+    // passed. Only then is the full extra built, so the tick itself adds almost no load
+    // (load shifts the NTC reading). Off below firmware v2.1.023: before healthd smoothed
+    // the reading, a 0.2 C step would have fired on its noise every tick.
+    private static final double TEMP_FAST_STEP_C = 0.2;
+    private static final long TEMP_FAST_HEARTBEAT_MS = 60_000L;
+    private volatile int tempFastSec = 0;
+    private volatile long lastTempSentMs = 0;          // elapsedRealtime of the last frame sent
+    private final Handler tempFastHandler = new Handler(Looper.getMainLooper());
+    private final Runnable tempFastTick = new Runnable() {
+        @Override public void run() {
+            int sec = tempFastSec;
+            if (sec <= 0) return;
+            double cur = extractBatteryTemperature(getBatteryIntent());
+            double prev;
+            synchronized (baselineLock) {
+                prev = lastSentExtra == null ? SENTINEL_TEMP_C
+                        : lastSentExtra.optDouble("battery_temp_c", SENTINEL_TEMP_C);
+            }
+            if (cur > SENTINEL_TEMP_C && (prev <= SENTINEL_TEMP_C
+                    || Math.abs(cur - prev) >= TEMP_FAST_STEP_C
+                    || SystemClock.elapsedRealtime() - lastTempSentMs >= TEMP_FAST_HEARTBEAT_MS)) {
+                sendTelemetryOverWs();
+            }
+            tempFastHandler.postDelayed(this, sec * 1000L);
+        }
+    };
     private static final int CHARGER_STEP_MV = 50;      // the pack's own range spans ~45 mV
     private final Object quantLock = new Object();      // guards the reported value above
 
@@ -1250,6 +1280,7 @@ public class MdmService extends Service {
                 scheduleNextPoll(); // re-arm the alarm immediately at the new cadence
             }
         }
+        applyTempFast(config.optInt("temp_fast_sec", 0));
         // Offline kiosk-exit policy (TOTP seed + settings) is provisioned via config;
         // store it before applying kiosk policy so a suspended device is respected.
         try {
@@ -1291,6 +1322,33 @@ public class MdmService extends Service {
         } catch (Exception e) {
             Log.e(TAG, "kiosk applyAndSave error: " + e.getMessage());
         }
+    }
+
+    /** Starts, retimes or stops the fast-temperature tick (see tempFastTick). */
+    private void applyTempFast(int sec) {
+        if (sec > 0 && !firmwareSmoothsTemp()) sec = 0;
+        if (sec > 0 && sec < 2) sec = 2;
+        if (sec == tempFastSec) return;
+        tempFastSec = sec;
+        tempFastHandler.removeCallbacks(tempFastTick);
+        if (sec > 0) tempFastHandler.postDelayed(tempFastTick, sec * 1000L);
+        Log.i(TAG, sec > 0 ? "Fast temperature on: every " + sec + "s" : "Fast temperature off");
+    }
+
+    /** Firmware v2.1.023+ (qcom line), whose healthd keeps a 30 s mean of the battery NTC. */
+    static boolean firmwareSmoothsTemp(String buildId) {
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("^v(\\d+)\\.(\\d+)\\.(\\d+)").matcher(buildId == null ? "" : buildId);
+        if (!m.find()) return false;
+        int major = Integer.parseInt(m.group(1)), minor = Integer.parseInt(m.group(2));
+        int patch = Integer.parseInt(m.group(3));
+        if (major != 2) return major > 2;
+        if (minor != 1) return minor > 1;
+        return patch >= 23;
+    }
+
+    private boolean firmwareSmoothsTemp() {
+        return firmwareSmoothsTemp(currentBuildId());
     }
 
     private synchronized void startWebSocket() {
@@ -2912,7 +2970,12 @@ public class MdmService extends Service {
         double prev = lastSentExtra.optDouble("battery_temp_c", -999);
         if (prev <= -999) return true;
         // 1 °C, not the old 2 °C: at 2 °C the dashboard sat on a stale temperature for
-        // 4–6 minutes at a time on battery.
+        // 4–6 minutes at a time on battery. In fast mode the tick above decides, with its
+        // own step and heartbeat.
+        if (tempFastSec > 0) {
+            if (Math.abs(cur - prev) >= TEMP_FAST_STEP_C) return true;
+            if (SystemClock.elapsedRealtime() - lastTempSentMs >= TEMP_FAST_HEARTBEAT_MS) return true;
+        }
         if (Math.abs(cur - prev) >= 1.0) return true;
         return tempBand(cur) != tempBand(prev);
     }
@@ -2926,6 +2989,7 @@ public class MdmService extends Service {
             catch (JSONException e) { lastSentExtra = null; }
             lastSentBattery = battery;
         }
+        lastTempSentMs = SystemClock.elapsedRealtime();
         forceKeyframe = false;
     }
 
@@ -3655,6 +3719,7 @@ public class MdmService extends Service {
             try { unregisterReceiver(notifDismissReceiver); } catch (Exception ignored) {}
         }
         flapHandler.removeCallbacks(flapSettleCheck);
+        tempFastHandler.removeCallbacks(tempFastTick);
         executor.shutdownNow();
         if (heavyExecutor != null) heavyExecutor.shutdownNow();
         if (wlcWatcher != null) wlcWatcher.shutdownNow();
