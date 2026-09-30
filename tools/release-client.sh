@@ -96,10 +96,14 @@ release_tree() {
     return 1
   fi
   # Builds the tree (slow); publish-client.sh infers the slot from the signing key.
-  run "$PUBLISH" --tree "$tree"
+  # Explicit "|| return": this function is called as `release_tree ... || rc=1`, and bash
+  # ignores set -e inside a function called from an || list. Without it a failed build
+  # fell through to the live step, which published whatever stale APK was in out/, and
+  # the release still reported success.
+  run "$PUBLISH" --tree "$tree" || { echo "  $name: build or stage publish failed; not publishing to live" >&2; return 1; }
   # Same APK, second server: no rebuild, so both servers are guaranteed the same bytes.
   if [ "$LIVE" -eq 1 ]; then
-    run_live "$PUBLISH" --live --tree "$tree" --apk-latest
+    run_live "$PUBLISH" --live --tree "$tree" --apk-latest || { echo "  $name: live publish failed" >&2; return 1; }
   fi
   echo
 }
