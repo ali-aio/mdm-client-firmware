@@ -129,6 +129,7 @@ public class MdmService extends Service {
     private OfflineQueue offlineQueue;
     private volatile boolean serverReachable = true;
     private volatile long lastQueuedAt = 0;
+    private long lastQueuedCrashMs = 0; // newest crash already put in a kept reading
     private final AtomicBoolean flushingOffline = new AtomicBoolean(false);
     private static final long OFFLINE_SAMPLE_MS = 5 * 60_000L;
     private ConnectivityManager connectivityManager;
@@ -1436,7 +1437,29 @@ public class MdmService extends Service {
                 r.put("ram_used_mb", ram.optInt("used"));
                 r.put("ram_total_mb", ram.optInt("total"));
             }
+            // 1.7.1: the states the charge strip draws, exactly as a check-in reports them.
+            if (extra.has("charging")) r.put("charging", extra.opt("charging"));
+            if (extra.has("wlc_status")) r.put("wlc_status", extra.opt("wlc_status"));
         }
+        // 1.7.1: crashes since the previous kept reading. A live check-in only looks back
+        // an hour, so a longer outage lost everything before that; each kept reading takes
+        // what happened since the last one. Traces are cut to 8 KB so a crashing device
+        // can't fill the queue; the server dedupes a crash also reported live.
+        JSONArray crashes = new JSONArray();
+        long newest = lastQueuedCrashMs;
+        JSONArray recent = getRecentCrashEvents();
+        for (int i = 0; i < recent.length(); i++) {
+            JSONObject c = recent.optJSONObject(i);
+            if (c == null) continue;
+            long t = c.optLong("time_ms", 0);
+            if (t <= lastQueuedCrashMs) continue;
+            String trace = c.optString("trace", "");
+            if (trace.length() > 8192) c.put("trace", trace.substring(0, 8192));
+            crashes.put(c);
+            if (t > newest) newest = t;
+        }
+        lastQueuedCrashMs = newest;
+        if (crashes.length() > 0) r.put("crashes", crashes);
         return r;
     }
 
