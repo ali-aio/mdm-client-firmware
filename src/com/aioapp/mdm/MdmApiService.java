@@ -111,6 +111,16 @@ public class MdmApiService {
         if (r != null) r.run();
     }
 
+    /** POST /api/v1/checkins/backfill: readings kept while offline. Returns the HTTP status, -1 on a network error. */
+    int postBackfill(JSONObject body) {
+        try {
+            return doPost("/api/v1/checkins/backfill", body.toString()).code;
+        } catch (Exception e) {
+            Log.w(TAG, "backfill failed: " + e.getMessage());
+            return -1;
+        }
+    }
+
     /**
      * POST /api/v1/device-key: register this device's own key, by its SHA-256, with the
      * shared key. Returns the HTTP status (200 registered, 409 retry after a check-in,

@@ -125,6 +125,12 @@ public class MdmService extends Service {
     // This device's own server key (device-key plan, phase 2); registered after a check-in.
     private DeviceKey deviceKey;
     private volatile long nextKeyAttemptAt = 0;
+    // Readings kept while the MDM can't be reached (1.7.0), sent when it can again.
+    private OfflineQueue offlineQueue;
+    private volatile boolean serverReachable = true;
+    private volatile long lastQueuedAt = 0;
+    private final AtomicBoolean flushingOffline = new AtomicBoolean(false);
+    private static final long OFFLINE_SAMPLE_MS = 5 * 60_000L;
     private ConnectivityManager connectivityManager;
     private ConnectivityManager.NetworkCallback networkCallback;
     private DevicePolicyManager dpm;
@@ -381,6 +387,7 @@ public class MdmService extends Service {
         wifiScanExecutor.scheduleWithFixedDelay(this::runWifiScan, 0, WIFI_SCAN_INTERVAL_SEC, TimeUnit.SECONDS);
         apiService = new MdmApiService();
         try {
+            offlineQueue = new OfflineQueue(this);
             deviceKey = new DeviceKey(this);
             apiService.setDeviceKey(deviceKey, () -> executor.submit(this::restartWebSocket));
             Log.i(TAG, deviceKey.active() != null ? "Using this device's own key" : "No device key yet; using the shared key");
@@ -513,6 +520,7 @@ public class MdmService extends Service {
         pollReceiver = new BroadcastReceiver() {
             @Override public void onReceive(Context context, Intent intent) {
                 if (networkAvailable && !polling) performCheckin();
+                else maybeQueueOffline();
                 scheduleNextPoll();
             }
         };
@@ -783,6 +791,7 @@ public class MdmService extends Service {
         // "installing" until this service happens to restart.
         ClientUpdater.sweepStalePending(this,
                 (cmdId, status, output) -> reportTerminal(cmdId, getDeviceSerial(), status, output));
+        maybeQueueOffline();
         if (wsClient != null && wsClient.isConnected()) {
             // Liveness is gauged by data *received* (server keepalive pings every ~45s), not by
             // how often we send — with change-gated telemetry a healthy link can be quiet.
@@ -812,7 +821,11 @@ public class MdmService extends Service {
                         JSONObject config = response.optJSONObject("config");
                         if (config != null) applyConfig(config);
                         maybeRegisterDeviceKey();
+                        serverReachable = true;
+                        flushOfflineQueue();
                     } else {
+                        serverReachable = false;
+                        maybeQueueOffline();
                         Log.w(TAG, "Checkin failed, reloading remote config");
                         apiService.loadRemoteConfig();
                         remoteConfigLoaded = true;
@@ -1384,6 +1397,83 @@ public class MdmService extends Service {
         nextKeyAttemptAt = now + ((code == 403 || code == 404) ? 6 * 3600_000L : 10 * 60_000L);
     }
 
+    /**
+     * Out of contact (no socket, and no network or the last check-in failed): keep a
+     * reading every few minutes, to send when the MDM can be reached again.
+     */
+    private void maybeQueueOffline() {
+        if (offlineQueue == null) return;
+        if (wsClient != null && wsClient.isConnected()) return;
+        if (networkAvailable && serverReachable) return;
+        long now = System.currentTimeMillis();
+        if (now - lastQueuedAt < OFFLINE_SAMPLE_MS) return;
+        lastQueuedAt = now;
+        executor.submit(() -> {
+            try {
+                offlineQueue.add(offlineReading());
+            } catch (Exception e) {
+                Log.w(TAG, "could not keep an offline reading: " + e.getMessage());
+            }
+        });
+    }
+
+    /** The fields the server keeps as history, with the times it needs to place them. */
+    private JSONObject offlineReading() throws JSONException {
+        JSONObject p = buildCheckinPayload();
+        JSONObject extra = p.optJSONObject("extra");
+        JSONObject r = new JSONObject();
+        r.put("at_ms", System.currentTimeMillis());
+        r.put("elapsed_ms", android.os.SystemClock.elapsedRealtime());
+        r.put("boot_id", getBootId());
+        int bat = p.optInt("battery_pct", -1);
+        if (bat >= 0) r.put("battery_pct", bat);
+        if (extra != null) {
+            if (extra.has("battery_temp_c") && !extra.isNull("battery_temp_c")) r.put("temp_c", extra.optDouble("battery_temp_c"));
+            if (extra.has("wifi_rssi") && !extra.isNull("wifi_rssi")) r.put("wifi_rssi", extra.optInt("wifi_rssi"));
+            if (extra.has("storage_free_gb") && !extra.isNull("storage_free_gb")) r.put("storage_free_gb", extra.optDouble("storage_free_gb"));
+            JSONObject ram = extra.optJSONObject("ram_usage_mb");
+            if (ram != null && ram.has("used") && ram.has("total")) {
+                r.put("ram_used_mb", ram.optInt("used"));
+                r.put("ram_total_mb", ram.optInt("total"));
+            }
+        }
+        return r;
+    }
+
+    /** Send the kept readings, oldest first, deleting each batch the server answers for. */
+    private void flushOfflineQueue() {
+        if (offlineQueue == null || !flushingOffline.compareAndSet(false, true)) return;
+        executor.submit(() -> {
+            try {
+                while (true) {
+                    List<String> batch = offlineQueue.peek(200);
+                    if (batch.isEmpty()) break;
+                    JSONObject body = new JSONObject();
+                    body.put("serial", getDeviceSerial());
+                    body.put("now_ms", System.currentTimeMillis());
+                    body.put("now_elapsed_ms", android.os.SystemClock.elapsedRealtime());
+                    body.put("boot_id", getBootId());
+                    body.put("dropped", offlineQueue.dropped());
+                    org.json.JSONArray arr = new org.json.JSONArray();
+                    for (String line : batch) arr.put(new JSONObject(line));
+                    body.put("readings", arr);
+                    int code = apiService.postBackfill(body);
+                    if (code != 200) {
+                        Log.w(TAG, "offline readings not sent (" + code + "); " + offlineQueue.size() + " kept");
+                        break;
+                    }
+                    offlineQueue.remove(batch.size());
+                    offlineQueue.clearDropped();
+                    Log.i(TAG, "sent " + batch.size() + " reading(s) kept while offline");
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "sending offline readings failed: " + e.getMessage());
+            } finally {
+                flushingOffline.set(false);
+            }
+        });
+    }
+
     /** The key in use changed: reconnect the socket with it. */
     private synchronized void restartWebSocket() {
         if (wsClient != null) {
@@ -1399,7 +1489,7 @@ public class MdmService extends Service {
         wsClient = new MdmWebSocketClient(apiService.getApiBaseUrl(), serial, apiService.getApiKey());
         wsClient.setListener(this::handleWsMessage);
         // On every (re)connect the server has no baseline for us — send a full keyframe.
-        wsClient.setConnectedCallback(() -> { forceKeyframe = true; sendTelemetryOverWs(); drainPendingAcks(); });
+        wsClient.setConnectedCallback(() -> { forceKeyframe = true; sendTelemetryOverWs(); drainPendingAcks(); serverReachable = true; flushOfflineQueue(); });
         wsClient.start();
         Log.i(TAG, "WebSocket client started");
     }

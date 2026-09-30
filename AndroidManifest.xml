@@ -2,8 +2,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     android:sharedUserId="android.uid.system"
     package="com.aioapp.mdm"
-    android:versionCode="60"
-    android:versionName="1.6.2" >
+    android:versionCode="61"
+    android:versionName="1.7.0" >
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
