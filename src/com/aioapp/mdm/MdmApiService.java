@@ -12,13 +12,19 @@ import java.util.Random;
 
 public class MdmApiService {
     private static final String TAG = "MdmApiService";
-    // X-API-Key sent to the server; must equal DEVICE_API_KEY in that server's .env.
-    // Resolved from persist.sys.mdm.api_key first (set per image in build.prop or via
-    // setprop), falling back to this built-in default — same pattern as the URL/product
-    // props. Default matches the live server's DEVICE_API_KEY so an un-provisioned image
-    // still authenticates against the live fleet.
+    // The shared key, used until this device has its own (DeviceKey). Where it comes from,
+    // first match wins:
+    //   1. persist.sys.mdm.api_key set to anything but the public default — a runtime
+    //      setprop, for pointing one device at another server;
+    //   2. ro.aio.mdm.enroll_key — the enrollment key, injected into images built from
+    //      30 Sep from a file on the build machine and never committed anywhere;
+    //   3. the public default below, which older images also carry in build.prop as
+    //      persist.sys.mdm.api_key. It is in public git history, so it proves nothing;
+    //      it stays only so an old image keeps working until the server retires it
+    //      (device-key plan, phase 4).
     private static final String DEFAULT_API_KEY = "your-secret-key-here";
     private static final String API_KEY_OVERRIDE_PROP = "persist.sys.mdm.api_key";
+    private static final String ENROLL_KEY_PROP = "ro.aio.mdm.enroll_key";
 
     private static final boolean USE_LOCAL_SERVER = false;
     private static final String LOCAL_API_BASE_URL = "http://10.32.1.113:8082";
@@ -63,14 +69,18 @@ public class MdmApiService {
     }
 
     private static String resolveApiKey() {
-        // Prop first (per-image build.prop or runtime setprop), else the built-in
-        // default. Never log the key value.
+        // Never log a key value.
         String override = SystemPropertiesProxy.get(API_KEY_OVERRIDE_PROP, "").trim();
-        if (!override.isEmpty()) {
-            Log.i(TAG, "API key from " + API_KEY_OVERRIDE_PROP);
+        if (!override.isEmpty() && !override.equals(DEFAULT_API_KEY)) {
+            Log.i(TAG, "Shared key from " + API_KEY_OVERRIDE_PROP);
             return override;
         }
-        Log.i(TAG, API_KEY_OVERRIDE_PROP + " unset; using built-in default");
+        String enroll = SystemPropertiesProxy.get(ENROLL_KEY_PROP, "").trim();
+        if (!enroll.isEmpty()) {
+            Log.i(TAG, "Shared key: the image's enrollment key");
+            return enroll;
+        }
+        Log.i(TAG, "Shared key: the public default (image has no enrollment key)");
         return DEFAULT_API_KEY;
     }
 
