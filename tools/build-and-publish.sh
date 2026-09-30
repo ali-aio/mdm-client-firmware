@@ -168,9 +168,11 @@ echo "→ publishing to $SERVER (slot $SLOT)"
 # THIS build. It defaults to the last commit's subject — which is only right when the
 # change being published is committed, and is otherwise the previous release's message.
 # Pass --changelog when the tree carries work that is not committed here.
-CHANGELOG_TEXT="${CHANGELOG_IN:-$(git -C "$(dirname "$0")/.." log -1 --pretty=%s 2>/dev/null || true)}"
+# Default: the last commit that changed the version (every bump is its own commit), so a
+# tools-only commit after the bump can't become the release's changelog.
+CHANGELOG_TEXT="${CHANGELOG_IN:-$(git -C "$(dirname "$0")/.." log -1 --pretty=%s -- AndroidManifest.xml 2>/dev/null || true)}"
 if [ -z "$CHANGELOG_IN" ]; then
-  echo "→ changelog from the last commit: \"$CHANGELOG_TEXT\""
+  echo "→ changelog from the version commit: \"$CHANGELOG_TEXT\""
   echo "  (uncommitted work in the tree will not appear here — pass --changelog to name it)"
 fi
 CHANGELOG=$(printf '%s' "$CHANGELOG_TEXT" | python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.stdin.read().strip()))' || true)
