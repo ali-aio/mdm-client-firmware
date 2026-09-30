@@ -32,6 +32,10 @@ public class MdmApiService {
 
     private volatile String apiBaseUrl = resolveBaseUrl();
     private volatile String apiKey = resolveApiKey();
+    // This device's own key (DeviceKey); null until MdmService hands it over. When it holds
+    // a registered key, that key is sent instead of the shared one.
+    private volatile DeviceKey deviceKey;
+    private volatile Runnable onKeyChange;
     // Written on the executor thread (applyConfig / checkin), read on the alarm thread.
     private volatile long pollIntervalMs = DEFAULT_POLL_INTERVAL_MS;
     private volatile int consecutiveFailures = 0;
@@ -72,6 +76,52 @@ public class MdmApiService {
 
     public String getApiKey() { return apiKey; }
 
+    /** Use the device's own key when it has one; onChange runs when the key in use changes. */
+    void setDeviceKey(DeviceKey key, Runnable onChange) {
+        deviceKey = key;
+        onKeyChange = onChange;
+        apiKey = resolveKey();
+    }
+
+    boolean usingOwnKey() {
+        DeviceKey k = deviceKey;
+        return k != null && k.active() != null && k.active().equals(apiKey);
+    }
+
+    private String resolveKey() {
+        DeviceKey k = deviceKey;
+        String own = k != null ? k.active() : null;
+        return own != null ? own : resolveApiKey();
+    }
+
+    /** The device's key was just registered: switch to it. */
+    void keyChanged() {
+        apiKey = resolveKey();
+        Runnable r = onKeyChange;
+        if (r != null) r.run();
+    }
+
+    /**
+     * POST /api/v1/device-key: register this device's own key, by its SHA-256, with the
+     * shared key. Returns the HTTP status (200 registered, 409 retry after a check-in,
+     * 403/404 not for this device), or -1 on a network error.
+     */
+    int registerDeviceKey(String serial, String keySha256, String bootId, String buildId) {
+        try {
+            JSONObject body = new JSONObject();
+            body.put("serial", serial);
+            body.put("key_sha256", keySha256);
+            body.put("boot_id", bootId);
+            body.put("build_id", buildId);
+            PostResult r = doPost("/api/v1/device-key", body.toString(), resolveApiKey());
+            Log.i(TAG, "Device key registration: " + r.code + (r.code == 200 ? "" : " " + r.body));
+            return r.code;
+        } catch (Exception e) {
+            Log.w(TAG, "Device key registration failed: " + e.getMessage());
+            return -1;
+        }
+    }
+
     public String getApiBaseUrl() { return apiBaseUrl; }
 
     public long getPollInterval() { return pollIntervalMs; }
@@ -95,7 +145,7 @@ public class MdmApiService {
         // Re-read the persistent property so a setprop takes effect at the next
         // sync without restarting the service.
         apiBaseUrl = resolveBaseUrl();
-        apiKey = resolveApiKey();
+        apiKey = resolveKey();
     }
 
     /**
@@ -301,11 +351,26 @@ public class MdmApiService {
     }
 
     private PostResult doPost(String endpoint, String jsonBody) throws Exception {
+        String key = apiKey;
+        PostResult r = doPost(endpoint, jsonBody, key);
+        // 401 to our own key: the server no longer has it (a database restore, or an admin
+        // reset after this device lost it and got it back). Go back to the shared key; the
+        // next check-in registers a new one.
+        if (r.code == HttpURLConnection.HTTP_UNAUTHORIZED && usingOwnKey() && key.equals(apiKey)) {
+            Log.w(TAG, "Server refused this device's own key; back to the shared key");
+            DeviceKey k = deviceKey;
+            if (k != null) k.forget();
+            keyChanged();
+        }
+        return r;
+    }
+
+    private PostResult doPost(String endpoint, String jsonBody, String key) throws Exception {
         URL url = new URL(apiBaseUrl + endpoint);
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
         conn.setRequestMethod("POST");
         conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
-        conn.setRequestProperty("X-API-Key", apiKey);
+        conn.setRequestProperty("X-API-Key", key);
         conn.setDoOutput(true);
         conn.setConnectTimeout(10_000);
         conn.setReadTimeout(30_000);

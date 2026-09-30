@@ -122,6 +122,9 @@ public class MdmService extends Service {
     private PendingIntent pollIntent;
     private BroadcastReceiver pollReceiver;
     private MdmApiService apiService;
+    // This device's own server key (device-key plan, phase 2); registered after a check-in.
+    private DeviceKey deviceKey;
+    private volatile long nextKeyAttemptAt = 0;
     private ConnectivityManager connectivityManager;
     private ConnectivityManager.NetworkCallback networkCallback;
     private DevicePolicyManager dpm;
@@ -377,6 +380,13 @@ public class MdmService extends Service {
         wifiScanExecutor = Executors.newSingleThreadScheduledExecutor();
         wifiScanExecutor.scheduleWithFixedDelay(this::runWifiScan, 0, WIFI_SCAN_INTERVAL_SEC, TimeUnit.SECONDS);
         apiService = new MdmApiService();
+        try {
+            deviceKey = new DeviceKey(this);
+            apiService.setDeviceKey(deviceKey, () -> executor.submit(this::restartWebSocket));
+            Log.i(TAG, deviceKey.active() != null ? "Using this device's own key" : "No device key yet; using the shared key");
+        } catch (Exception e) {
+            Log.w(TAG, "Device key storage unavailable, staying on the shared key: " + e.getMessage());
+        }
         // Restore command dedup + any terminal acks that weren't confirmed before a restart,
         // and try to flush the acks now (also retried on every reconnect).
         loadCommandState();
@@ -801,6 +811,7 @@ public class MdmService extends Service {
                         if (response.optBoolean("send_apps", false)) sendFullAppList = true;
                         JSONObject config = response.optJSONObject("config");
                         if (config != null) applyConfig(config);
+                        maybeRegisterDeviceKey();
                     } else {
                         Log.w(TAG, "Checkin failed, reloading remote config");
                         apiService.loadRemoteConfig();
@@ -1349,6 +1360,37 @@ public class MdmService extends Service {
 
     private boolean firmwareSmoothsTemp() {
         return firmwareSmoothsTemp(currentBuildId());
+    }
+
+    /**
+     * Register this device's own key, once, right after a check-in: the server accepts it
+     * only from the address it just heard from, with the boot id and build it was just
+     * told. 409 means "not yet" (retry after the next check-in); 403/404 mean this server
+     * doesn't take keys from this device, so try again much later.
+     */
+    private void maybeRegisterDeviceKey() {
+        DeviceKey k = deviceKey;
+        if (k == null || k.active() != null) return;
+        long now = System.currentTimeMillis();
+        if (now < nextKeyAttemptAt) return;
+        String key = k.pendingOrCreate();
+        int code = apiService.registerDeviceKey(getDeviceSerial(), DeviceKey.sha256Hex(key), getBootId(), currentBuildId());
+        if (code == 200) {
+            k.promote();
+            Log.i(TAG, "Registered this device's own key; the shared key is no longer accepted for it");
+            apiService.keyChanged();
+            return;
+        }
+        nextKeyAttemptAt = now + ((code == 403 || code == 404) ? 6 * 3600_000L : 10 * 60_000L);
+    }
+
+    /** The key in use changed: reconnect the socket with it. */
+    private synchronized void restartWebSocket() {
+        if (wsClient != null) {
+            wsClient.stop();
+            wsClient = null;
+        }
+        startWebSocket();
     }
 
     private synchronized void startWebSocket() {
