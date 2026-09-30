@@ -81,6 +81,12 @@ fi
 SYNC=1
 for a in "${EXTRA[@]:-}"; do [ "$a" = "--no-sync" ] && SYNC=0; done
 TREE_APP="$TREE/qssi/packages/apps/mdm-client"
+# Copying into the tree while an image is building there puts a half-copied client into
+# that image, so the copy waits for the same idle tree as the build (wait-idle.sh).
+if [ "$SYNC" -eq 1 ] && [ "$DRY" -eq 0 ] && [ -d "$TREE_APP" ] && [ -z "$APK" ]; then
+  . "$HERE/wait-idle.sh"
+  wait_until_idle || exit 1
+fi
 if [ "$SYNC" -eq 1 ] && [ "$DRY" -eq 0 ] && [ -d "$TREE_APP" ]; then
   if ! diff -rq "$HERE/../src" "$TREE_APP/src" >/dev/null 2>&1 \
      || ! cmp -s "$HERE/../AndroidManifest.xml" "$TREE_APP/AndroidManifest.xml"; then

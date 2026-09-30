@@ -57,11 +57,15 @@ if ! command -v apksigner >/dev/null || ! command -v aapt >/dev/null; then
   done
 fi
 
+# Only build while no other build is running: see wait-idle.sh.
+. "$(dirname "$0")/wait-idle.sh"
+
 # The client is a qssi (system) module, so it builds in the qssi lunch target — the same
 # one build-wifionly.sh uses for the system half of the image.
 if [ -n "$APKIN" ]; then
   echo "→ skipping the build: publishing the APK passed to --apk"
 elif [ -z "$TF" ]; then
+  wait_until_idle || exit 1
   echo "→ building mdm-client in $TREE (qssi-$VARIANT)"
   (
     cd "$TREE/qssi"
