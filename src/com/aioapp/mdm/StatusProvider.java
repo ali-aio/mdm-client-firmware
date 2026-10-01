@@ -23,7 +23,8 @@ import java.util.List;
  * <li>{@code /glance}: chips — {@code icon} (a name the launcher maps to a glyph),
  *     {@code text}, {@code intent} (an {@code intent:} URI or null) and {@code priority}
  *     (higher first; the launcher asks for {@code "priority DESC"}, and ascending is honoured
- *     too). One row each for the restaurant, the table and the guest Wi-Fi, when set. With
+ *     too). One row each for the restaurant and the guest Wi-Fi, when set (the table is in
+ *     the Welcome widget, not a chip). With
  *     nothing set the cursor is empty, not null: the launcher shows its own chips (device
  *     name, network, battery) for an empty answer exactly as for a missing provider, and an
  *     empty cursor is not logged as a failure.</li>
@@ -43,7 +44,6 @@ public class StatusProvider extends ContentProvider {
     static final String[] WELCOME_COLUMNS = {"restaurant_name", "table_label", "wifi_ssid"};
 
     static final int PRIORITY_RESTAURANT = 30;
-    static final int PRIORITY_TABLE = 20;
     static final int PRIORITY_WIFI = 10;
 
     private static final int GLANCE = 1;
@@ -90,9 +90,6 @@ public class StatusProvider extends ContentProvider {
         List<Chip> chips = new ArrayList<>(3);
         if (g.hasRestaurant()) {
             chips.add(new Chip("storefront", g.restaurantName, null, PRIORITY_RESTAURANT));
-        }
-        if (g.hasTable()) {
-            chips.add(new Chip("table", g.tableLabel, null, PRIORITY_TABLE));
         }
         if (g.hasWifi()) {
             Intent open = new Intent(Intent.ACTION_VIEW)
