@@ -58,4 +58,16 @@
         <item name="android:textColor">@android:color/darker_gray</item>
     </style>
 
+    <!-- Guest Wi-Fi card: a floating dark card over a dimmed home screen. The card draws
+         its own rounded background, so the window's is transparent. -->
+    <style name="GuestDialogTheme" parent="android:Theme.DeviceDefault.Dialog.NoActionBar">
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowIsFloating">true</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:backgroundDimEnabled">true</item>
+        <item name="android:backgroundDimAmount">0.6</item>
+        <item name="android:windowCloseOnTouchOutside">true</item>
+        <item name="android:textColorHighlight">#66F9674E</item>
+    </style>
+
 </resources>

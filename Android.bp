@@ -4,6 +4,8 @@ android_app {
     certificate: "platform",
     privileged: true,
     platform_apis: true,
+    // QR code on the guest Wi-Fi card (GuestWifiActivity).
+    static_libs: ["zxing-core"],
     dex_preopt: {
         enabled: false,
     },

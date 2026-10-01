@@ -1306,6 +1306,13 @@ public class MdmService extends Service {
             }
         }
         applyTempFast(config.optInt("temp_fast_sec", 0));
+        // Guest info for the home and lock screens (HTTP check-ins carry it; over the socket
+        // it comes as its own "guest" frame). A config without it leaves what we have.
+        try {
+            GuestInfo.save(MdmService.this, config.optJSONObject("guest"));
+        } catch (Exception e) {
+            Log.e(TAG, "guest info save error: " + e.getMessage());
+        }
         // Offline kiosk-exit policy (TOTP seed + settings) is provisioned via config;
         // store it before applying kiosk policy so a suspended device is respected.
         try {
@@ -1549,6 +1556,15 @@ public class MdmService extends Service {
                 executor.submit(() -> {
                     try { applyConfig(msg); } catch (Exception e) {
                         Log.e(TAG, "WS config error: " + e.getMessage());
+                    }
+                });
+                break;
+            case "guest":
+                // Venue, table and guest Wi-Fi: sent on connect and whenever they change.
+                // Its own frame, not a "config" — a config frame is applied whole.
+                executor.submit(() -> {
+                    try { GuestInfo.save(MdmService.this, msg.optJSONObject("guest")); } catch (Exception e) {
+                        Log.e(TAG, "WS guest error: " + e.getMessage());
                     }
                 });
                 break;

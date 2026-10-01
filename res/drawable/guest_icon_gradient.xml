@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Round AIO badge: the coral to indigo brand gradient. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="oval">
+    <gradient
+        android:type="linear"
+        android:angle="315"
+        android:startColor="@color/aio_coral"
+        android:endColor="@color/aio_indigo" />
+</shape>

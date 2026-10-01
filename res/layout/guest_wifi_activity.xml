@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Guest Wi-Fi card (GuestWifiActivity): network, password and a QR code to join. -->
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content">
+
+    <LinearLayout
+        android:layout_width="320dp"
+        android:layout_height="wrap_content"
+        android:background="@drawable/guest_dialog_bg"
+        android:gravity="center_horizontal"
+        android:orientation="vertical"
+        android:paddingStart="24dp"
+        android:paddingTop="24dp"
+        android:paddingEnd="24dp"
+        android:paddingBottom="20dp">
+
+        <FrameLayout
+            android:layout_width="52dp"
+            android:layout_height="52dp"
+            android:background="@drawable/guest_soft_circle">
+
+            <ImageView
+                android:layout_width="28dp"
+                android:layout_height="28dp"
+                android:layout_gravity="center"
+                android:importantForAccessibility="no"
+                android:src="@drawable/guest_ic_wifi" />
+        </FrameLayout>
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:fontFamily="aio-sans-medium"
+            android:text="@string/guest_wifi_title"
+            android:textColor="@color/guest_text"
+            android:textSize="22sp" />
+
+        <TextView
+            android:id="@+id/guest_wifi_hint"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:fontFamily="aio-sans"
+            android:gravity="center"
+            android:text="@string/guest_wifi_scan_hint"
+            android:textColor="@color/guest_text_dim"
+            android:textSize="14sp" />
+
+        <ImageView
+            android:id="@+id/guest_wifi_qr"
+            android:layout_width="@dimen/guest_qr_size"
+            android:layout_height="@dimen/guest_qr_size"
+            android:layout_marginTop="18dp"
+            android:background="@drawable/guest_qr_bg"
+            android:contentDescription="@string/guest_wifi_qr_description"
+            android:padding="12dp"
+            android:scaleType="fitCenter" />
+
+        <LinearLayout
+            android:id="@+id/guest_wifi_details"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="18dp"
+            android:orientation="vertical">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:fontFamily="aio-sans"
+                android:text="@string/guest_wifi_network"
+                android:textColor="@color/guest_text_faint"
+                android:textSize="12sp" />
+
+            <TextView
+                android:id="@+id/guest_wifi_ssid"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:fontFamily="aio-sans-medium"
+                android:textColor="@color/guest_text"
+                android:textIsSelectable="true"
+                android:textSize="17sp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:fontFamily="aio-sans"
+                android:text="@string/guest_wifi_password"
+                android:textColor="@color/guest_text_faint"
+                android:textSize="12sp" />
+
+            <TextView
+                android:id="@+id/guest_wifi_password"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:fontFamily="aio-sans-medium"
+                android:textColor="@color/guest_text"
+                android:textIsSelectable="true"
+                android:textSize="17sp" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/guest_wifi_done"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:layout_marginTop="20dp"
+            android:background="@drawable/guest_button_bg"
+            android:focusable="true"
+            android:clickable="true"
+            android:fontFamily="aio-sans-medium"
+            android:gravity="center"
+            android:text="@string/guest_wifi_done"
+            android:textColor="@color/guest_text"
+            android:textSize="15sp" />
+    </LinearLayout>
+</ScrollView>

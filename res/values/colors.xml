@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- AIO brand: coral primary, indigo (periwinkle) secondary. -->
+    <color name="aio_coral">#F9674E</color>
+    <color name="aio_indigo">#7A80F6</color>
+    <!-- Guest surfaces (widgets, Wi-Fi card): dark frosted glass with white type. -->
+    <color name="guest_card">#B8141220</color>
+    <color name="guest_card_solid">#F2141220</color>
+    <color name="guest_card_edge">#1FFFFFFF</color>
+    <color name="guest_text">#FFFFFFFF</color>
+    <color name="guest_text_dim">#B3FFFFFF</color>
+    <color name="guest_text_faint">#80FFFFFF</color>
+    <color name="guest_soft_white">#24FFFFFF</color>
+    <color name="guest_soft_coral">#33F9674E</color>
+</resources>

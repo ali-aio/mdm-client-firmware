@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Guest Wi-Fi card as the widget picker previews it, with a sample network. Only RemoteViews-safe views (LinearLayout, FrameLayout, ImageView, TextView). -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/guest_wifi_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/guest_widget_bg"
+    android:gravity="center_vertical"
+    android:orientation="horizontal"
+    android:paddingStart="12dp"
+    android:paddingEnd="12dp"
+    android:paddingTop="8dp"
+    android:paddingBottom="8dp">
+
+    <FrameLayout
+        android:layout_width="40dp"
+        android:layout_height="40dp"
+        android:background="@drawable/guest_soft_circle">
+
+        <ImageView
+            android:layout_width="22dp"
+            android:layout_height="22dp"
+            android:layout_gravity="center"
+            android:importantForAccessibility="no"
+            android:src="@drawable/guest_ic_wifi" />
+    </FrameLayout>
+
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="10dp"
+        android:layout_weight="1"
+        android:orientation="vertical">
+
+        <TextView
+            android:id="@+id/guest_wifi_title"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:ellipsize="end"
+            android:fontFamily="aio-sans-medium"
+            android:maxLines="1"
+            android:text="@string/guest_wifi_title"
+            android:textColor="@color/guest_text"
+            android:textSize="15sp" />
+
+        <TextView
+            android:id="@+id/guest_wifi_subtitle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="1dp"
+            android:ellipsize="end"
+            android:fontFamily="aio-sans"
+            android:maxLines="1"
+            android:text="@string/guest_wifi_preview_ssid"
+            android:textColor="@color/guest_text_dim"
+            android:textSize="13sp" />
+    </LinearLayout>
+</LinearLayout>

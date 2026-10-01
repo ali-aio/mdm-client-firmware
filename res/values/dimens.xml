@@ -2,4 +2,6 @@
     <!-- Default screen margins, per the Android Design guidelines. -->
     <dimen name="activity_horizontal_margin">16dp</dimen>
     <dimen name="activity_vertical_margin">16dp</dimen>
+    <!-- Guest Wi-Fi card: the QR code's side. -->
+    <dimen name="guest_qr_size">220dp</dimen>
 </resources>

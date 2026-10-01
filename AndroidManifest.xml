@@ -77,6 +77,54 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
+        <!-- Guest info for the T7's home and lock screens (see GuestInfo). The AIO launcher's
+             glance header and SystemUI's lock-screen welcome read it; read-only, and readable
+             by anyone because it holds only what the tablet shows every guest (not the Wi-Fi
+             password). directBootAware: its data is in device-protected storage, so it can
+             answer from the start of a boot. -->
+        <provider
+            android:name=".StatusProvider"
+            android:authorities="com.aioapp.status"
+            android:directBootAware="true"
+            android:exported="true"
+            android:grantUriPermissions="false" />
+
+        <!-- Guest home-screen widgets: the 4x1 welcome card and the 2x1 guest Wi-Fi card. -->
+        <receiver
+            android:name=".GuestWelcomeWidget"
+            android:exported="true"
+            android:label="@string/guest_welcome_widget_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/guest_welcome_widget_info" />
+        </receiver>
+
+        <receiver
+            android:name=".GuestWifiWidget"
+            android:exported="true"
+            android:label="@string/guest_wifi_widget_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/guest_wifi_widget_info" />
+        </receiver>
+
+        <!-- Guest Wi-Fi card with the join QR code. Exported: the launcher's Wi-Fi chip opens
+             it, as does the Wi-Fi widget. -->
+        <activity
+            android:name=".GuestWifiActivity"
+            android:label="@string/guest_wifi_title"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTop"
+            android:taskAffinity="com.aioapp.mdm.guest"
+            android:theme="@style/GuestDialogTheme" />
+
         <!-- Offline kiosk-exit prompt (TOTP). Unused — the nav-bar gesture exits directly via
              MdmService's Settings.Secure-key ContentObserver, no code entry. Kept in the tree,
              not referenced. -->

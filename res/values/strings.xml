@@ -1,3 +1,28 @@
-<resources>
+<resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
     <string name="app_name">AIO MDM</string>
+
+    <!-- Guest widgets, status chips and the Wi-Fi card (T7 home and lock screen). -->
+    <string name="guest_welcome_widget_label">Welcome</string>
+    <string name="guest_welcome_widget_description">Welcomes guests to the restaurant and opens the menu</string>
+    <string name="guest_welcome_title">Welcome to <xliff:g id="restaurant" example="AIO Bistro">%1$s</xliff:g></string>
+    <string name="guest_welcome_title_plain">Welcome</string>
+    <string name="guest_welcome_subtitle_table"><xliff:g id="table" example="Table 12">%1$s</xliff:g> · tap to see the menu</string>
+    <string name="guest_welcome_subtitle">Tap to see the menu</string>
+    <string name="guest_welcome_preview_title">Welcome to AIO Bistro</string>
+    <string name="guest_welcome_preview_subtitle">Table 12 · tap to see the menu</string>
+
+    <string name="guest_wifi_widget_label">Guest Wi-Fi</string>
+    <string name="guest_wifi_widget_description">The restaurant\'s free Wi-Fi, with a QR code to join</string>
+    <string name="guest_wifi_title">Free Wi-Fi</string>
+    <string name="guest_wifi_preview_ssid">AIO-Guest</string>
+    <string name="guest_wifi_ask_staff">Ask our staff</string>
+    <string name="guest_wifi_ask_staff_long">Ask our staff for the Wi-Fi details.</string>
+    <string name="guest_wifi_scan_hint">Point your phone\'s camera at the code to join</string>
+    <string name="guest_wifi_join_by_name">Join this network from your phone\'s Wi-Fi settings</string>
+    <string name="guest_wifi_network">Network</string>
+    <string name="guest_wifi_password">Password</string>
+    <string name="guest_wifi_open_network">None — it\'s an open network</string>
+    <string name="guest_wifi_done">Done</string>
+    <string name="guest_wifi_qr_description">QR code to join the Wi-Fi</string>
+    <string name="guest_glance_wifi">Free Wi-Fi · <xliff:g id="ssid" example="AIO-Guest">%1$s</xliff:g></string>
 </resources>
