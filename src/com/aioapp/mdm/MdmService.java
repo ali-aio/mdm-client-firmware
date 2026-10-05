@@ -2573,8 +2573,8 @@ public class MdmService extends Service {
                         Log.i(TAG, "APK installed successfully");
                         success.set(true);
                     } else if (status == PackageInstaller.STATUS_PENDING_USER_ACTION) {
-                        Log.e(TAG, "PackageInstaller requires user action — check USER_ACTION_NOT_REQUIRED / INSTALL_PACKAGES permission");
-                        failReason.set("needs user action — INSTALL_PACKAGES not granted / not a privileged app");
+                        Log.e(TAG, "PackageInstaller requires user action — is the client still running as the system uid?");
+                        failReason.set("needs user action — client not running as the system uid");
                     } else {
                         String msg = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE);
                         int legacyStatus = intent.getIntExtra("android.content.pm.extra.LEGACY_STATUS", -999);

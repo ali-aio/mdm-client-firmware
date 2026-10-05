@@ -19,8 +19,8 @@ import java.util.Set;
  * OTA for this client itself — a new build of the MDM system app installed over the
  * running one, without a firmware image.
  *
- * This works because the app is not an ordinary app: it holds INSTALL_PACKAGES and runs
- * as android.uid.system, so it can drive PackageInstaller with no prompt. Android keeps
+ * This works because the app is not an ordinary app: it runs as android.uid.system, and
+ * PackageInstaller installs for the system uid with no prompt (no INSTALL_PACKAGES needed). Android keeps
  * the update in /data/app as an "updated system app", which retains the shared system
  * uid, the privileged flag and the sysconfig entry — all of them keyed to the package
  * name, which must therefore never change. A factory reset drops the update and reverts
