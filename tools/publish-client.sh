@@ -88,14 +88,20 @@ if [ "$SYNC" -eq 1 ] && [ "$DRY" -eq 0 ] && [ -d "$TREE_APP" ] && [ -z "$APK" ];
   wait_until_idle || exit 1
 fi
 if [ "$SYNC" -eq 1 ] && [ "$DRY" -eq 0 ] && [ -d "$TREE_APP" ]; then
+  # src/ and res/ are mirrored (--delete): a file removed here must go from the tree too, or
+  # it stays in the build (a removed widget's XML kept pointing at deleted strings and broke
+  # the link).
   if ! diff -rq "$HERE/../src" "$TREE_APP/src" >/dev/null 2>&1 \
+     || ! diff -rq "$HERE/../res" "$TREE_APP/res" >/dev/null 2>&1 \
+     || ! cmp -s "$HERE/../Android.bp" "$TREE_APP/Android.bp" \
      || ! cmp -s "$HERE/../AndroidManifest.xml" "$TREE_APP/AndroidManifest.xml"; then
     echo "→ syncing this repo into the build tree"
-    cp -r "$HERE/../src" "$TREE_APP/" 2>/dev/null
+    for d in src res; do
+      [ -d "$HERE/../$d" ] && rsync -a --delete "$HERE/../$d/" "$TREE_APP/$d/"
+    done
     for f in Android.bp AndroidManifest.xml; do
       [ -f "$HERE/../$f" ] && cp "$HERE/../$f" "$TREE_APP/$f"
     done
-    [ -d "$HERE/../res" ] && cp -r "$HERE/../res" "$TREE_APP/"
   else
     echo "→ tree copy already matches the repo"
   fi
