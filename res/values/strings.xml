@@ -22,5 +22,4 @@
     <string name="guest_wifi_open_network">None — it\'s an open network</string>
     <string name="guest_wifi_done">Done</string>
     <string name="guest_wifi_qr_description">QR code to join the Wi-Fi</string>
-    <string name="guest_glance_wifi">Free Wi-Fi · <xliff:g id="ssid" example="AIO-Guest">%1$s</xliff:g></string>
 </resources>
