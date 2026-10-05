@@ -37,7 +37,8 @@ final class GuestInfo {
      * The AIO guest ordering app the welcome card opens when the venue names none
      * (guest_app_package): production first, then the UAT build.
      */
-    static final String[] DEFAULT_GUEST_APPS = {"aio.app.nugget", "aio.app.nugget.uatv2"};
+    /** The AIO guest ordering app ships under aio.app.nugget and its variants (aio.app.nugget.*). */
+    static final String GUEST_APP_PREFIX = "aio.app.nugget";
 
     final String restaurantName;
     final String tableLabel;
@@ -156,7 +157,6 @@ final class GuestInfo {
             Log.w(TAG, "status notify failed: " + e.getMessage());
         }
         GuestWelcomeWidget.updateAll(ctx);
-        GuestWifiWidget.updateAll(ctx);
     }
 
     // ── Guest app ────────────────────────────────────────────────────────────
@@ -172,7 +172,17 @@ final class GuestInfo {
             Intent i = pm.getLaunchIntentForPackage(appPackage);
             if (i != null) return i;
         }
-        for (String pkg : DEFAULT_GUEST_APPS) {
+        // Any installed aio.app.nugget* app: aio.app.nugget itself first, then the others by name.
+        java.util.List<String> candidates = new java.util.ArrayList<>();
+        for (android.content.pm.ApplicationInfo ai : pm.getInstalledApplications(0)) {
+            if (ai.packageName.startsWith(GUEST_APP_PREFIX)) candidates.add(ai.packageName);
+        }
+        java.util.Collections.sort(candidates, (a, b) -> {
+            if (a.equals(GUEST_APP_PREFIX)) return -1;
+            if (b.equals(GUEST_APP_PREFIX)) return 1;
+            return a.compareTo(b);
+        });
+        for (String pkg : candidates) {
             Intent i = pm.getLaunchIntentForPackage(pkg);
             if (i != null) return i;
         }

@@ -6,13 +6,11 @@
     <string name="guest_welcome_widget_description">Welcomes guests to the restaurant and opens the menu</string>
     <string name="guest_welcome_title">Welcome to <xliff:g id="restaurant" example="AIO Bistro">%1$s</xliff:g></string>
     <string name="guest_welcome_title_plain">Welcome</string>
-    <string name="guest_welcome_subtitle_table"><xliff:g id="table" example="Table 12">%1$s</xliff:g> · tap to see the menu</string>
     <string name="guest_welcome_subtitle">Tap to see the menu</string>
+    <string name="guest_app_not_found">Nugget app not found</string>
     <string name="guest_welcome_preview_title">Welcome to AIO Bistro</string>
-    <string name="guest_welcome_preview_subtitle">Table 12 · tap to see the menu</string>
+    <string name="guest_welcome_preview_subtitle">Tap to see the menu</string>
 
-    <string name="guest_wifi_widget_label">Guest Wi-Fi</string>
-    <string name="guest_wifi_widget_description">The restaurant\'s free Wi-Fi, with a QR code to join</string>
     <string name="guest_wifi_title">Free Wi-Fi</string>
     <string name="guest_wifi_preview_ssid">AIO-Guest</string>
     <string name="guest_wifi_ask_staff">Ask our staff</string>

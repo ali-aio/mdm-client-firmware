@@ -2,8 +2,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     android:sharedUserId="android.uid.system"
     package="com.aioapp.mdm"
-    android:versionCode="65"
-    android:versionName="1.8.2" >
+    android:versionCode="66"
+    android:versionName="1.8.3" >
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -102,20 +102,8 @@
                 android:resource="@xml/guest_welcome_widget_info" />
         </receiver>
 
-        <receiver
-            android:name=".GuestWifiWidget"
-            android:exported="true"
-            android:label="@string/guest_wifi_widget_label">
-            <intent-filter>
-                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
-            </intent-filter>
-            <meta-data
-                android:name="android.appwidget.provider"
-                android:resource="@xml/guest_wifi_widget_info" />
-        </receiver>
-
         <!-- Guest Wi-Fi card with the join QR code. Exported: the launcher's Wi-Fi chip opens
-             it, as does the Wi-Fi widget. -->
+             it. -->
         <activity
             android:name=".GuestWifiActivity"
             android:label="@string/guest_wifi_title"

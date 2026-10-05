@@ -9,12 +9,13 @@ import android.content.Context;
 import android.content.Intent;
 import android.util.Log;
 import android.widget.RemoteViews;
+import android.widget.Toast;
 
 /**
- * The 4x1 welcome card on a T7's home screen: "Welcome to <restaurant>" over
- * "<table> · tap to see the menu". A tap opens the AIO guest ordering app (the venue's
- * guest_app_package when it names one that is installed, else the first installed of
- * {@link GuestInfo#DEFAULT_GUEST_APPS}); with none installed a tap does nothing.
+ * The 4x1 welcome card on a T7's home screen: "Welcome to <restaurant>" over "Tap to see the
+ * menu". A tap opens the AIO guest ordering app (the venue's guest_app_package when it names one
+ * that is installed, else any installed aio.app.nugget* app, see
+ * {@link GuestInfo#guestAppIntent}); with none installed it says so in a toast.
  *
  * The app is resolved when tapped, not when the card is drawn, so an ordering app
  * installed later works without the card having to be redrawn. The tap reaches us as a
@@ -57,9 +58,7 @@ public class GuestWelcomeWidget extends AppWidgetProvider {
         v.setTextViewText(R.id.guest_welcome_title, g.hasRestaurant()
                 ? ctx.getString(R.string.guest_welcome_title, g.restaurantName)
                 : ctx.getString(R.string.guest_welcome_title_plain));
-        v.setTextViewText(R.id.guest_welcome_subtitle, g.hasTable()
-                ? ctx.getString(R.string.guest_welcome_subtitle_table, g.tableLabel)
-                : ctx.getString(R.string.guest_welcome_subtitle));
+        v.setTextViewText(R.id.guest_welcome_subtitle, ctx.getString(R.string.guest_welcome_subtitle));
         Intent open = new Intent(ACTION_OPEN_GUEST_APP).setClass(ctx, GuestWelcomeWidget.class);
         PendingIntent pi = PendingIntent.getBroadcast(ctx, 0, open,
                 PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
@@ -71,7 +70,9 @@ public class GuestWelcomeWidget extends AppWidgetProvider {
     private static void openGuestApp(Context ctx) {
         Intent launch = GuestInfo.load(ctx).guestAppIntent(ctx);
         if (launch == null) {
-            Log.i(TAG, "no guest ordering app installed; ignoring the tap");
+            Log.i(TAG, "no guest ordering app installed");
+            Toast.makeText(ctx.getApplicationContext(), R.string.guest_app_not_found,
+                    Toast.LENGTH_SHORT).show();
             return;
         }
         launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
