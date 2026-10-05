@@ -3047,6 +3047,8 @@ public class MdmService extends Service {
         payload.put("serial_number", getDeviceSerial());
         payload.put("build_id", currentBuildId());
         payload.put("product", product.key());
+        String hw = getHardwareSerial();
+        if (!hw.isEmpty()) payload.put("hw_serial", hw);
         // Battery percent only for products with a battery; a no-battery kiosk omits it
         // (server keeps its prior value / default rather than storing a bogus reading, and
         // its check-in validation rejects the -1 "unknown" sentinel anyway).
@@ -3162,6 +3164,31 @@ public class MdmService extends Service {
         }
         lastTempSentMs = SystemClock.elapsedRealtime();
         forceKeyframe = false;
+    }
+
+    private String hardwareSerial;  // cached: the chip serial is fused in and never changes
+
+    /**
+     * The SoC's own serial as upper-case hex ("C45BCE30"), from the Qualcomm
+     * /sys/devices/soc0/serial_number (decimal). It is set by the chip, so unlike the AIO
+     * serial it survives a reflash; the server keeps a map from it to the AIO serials it has
+     * been seen under. Empty when the node is missing or unreadable (non-Qualcomm hardware).
+     */
+    private String getHardwareSerial() {
+        if (hardwareSerial != null) return hardwareSerial;
+        String hex = "";
+        try (java.io.BufferedReader r = new java.io.BufferedReader(
+                new java.io.InputStreamReader(new FileInputStream("/sys/devices/soc0/serial_number")))) {
+            String line = r.readLine();
+            if (line != null) {
+                long v = Long.parseLong(line.trim());
+                if (v > 0) hex = Long.toHexString(v).toUpperCase(java.util.Locale.US);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "No hardware serial: " + e.getMessage());
+        }
+        hardwareSerial = hex;
+        return hex;
     }
 
     private String getDeviceSerial() {
