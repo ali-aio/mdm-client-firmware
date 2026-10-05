@@ -2838,6 +2838,10 @@ public class MdmService extends Service {
         extra.put("agent_package", SELF_PACKAGE);
         extra.put("agent_version", clientVersionName());
         extra.put("agent_version_code", clientVersionCode());
+        // The Android IDs the Nugget apps see, which only the OS knows (see getNuggetAndroidIds).
+        JSONArray nuggetIds = getNuggetAndroidIds();
+        if (nuggetIds.length() > 0) extra.put("app_android_ids", nuggetIds);
+        extra.put("app_android_ids_readable", ssaidReadable);
         // A device identifying as msm-<ANDROID_ID> because its serial read corrupt says so,
         // with what the serial actually read, so the fleet can list it as such.
         getDeviceSerial();
@@ -3167,6 +3171,63 @@ public class MdmService extends Service {
     }
 
     private String hardwareSerial;  // cached: the chip serial is fused in and never changes
+
+    private static final String SSAID_FILE = "/data/system/users/0/settings_ssaid.xml";
+    private static final String NUGGET_PACKAGE_PREFIX = "aio.app.nugget";
+    private JSONArray ssaidCache = new JSONArray();
+    private long ssaidFileMtime = -1, ssaidCachedAt;
+    private boolean ssaidReadable;
+
+    /**
+     * Settings.Secure.ANDROID_ID is different for every app signing key, so what the Nugget
+     * apps use to identify the device is not what this client sees. The OS keeps each app's
+     * value in settings_ssaid.xml, keyed by the app's uid; firmware with the settings_ssaid_file
+     * sepolicy lets this client read it. Only the aio.app.nugget* entries are returned (package,
+     * uid and id); the file's "userkey" entry, the secret every ID is made from, is never
+     * read past (its name is not a uid) and nothing else in the file leaves the device.
+     * Re-read when the file changes or every 15 minutes, since installs change the uid map.
+     * Empty, with ssaidReadable false, on firmware without the sepolicy.
+     */
+    private synchronized JSONArray getNuggetAndroidIds() {
+        File f = new File(SSAID_FILE);
+        long now = SystemClock.elapsedRealtime();
+        long mtime = f.lastModified();
+        if (mtime == ssaidFileMtime && ssaidCachedAt != 0 && now - ssaidCachedAt < 15 * 60 * 1000L) return ssaidCache;
+        java.util.TreeMap<String, JSONObject> byPkg = new java.util.TreeMap<>();
+        boolean ok = false;
+        try (InputStream in = new FileInputStream(f)) {
+            org.xmlpull.v1.XmlPullParser p = android.util.Xml.resolvePullParser(in); // plain or binary XML
+            ok = true;
+            int ev;
+            while ((ev = p.next()) != org.xmlpull.v1.XmlPullParser.END_DOCUMENT) {
+                if (ev != org.xmlpull.v1.XmlPullParser.START_TAG || !"setting".equals(p.getName())) continue;
+                String name = p.getAttributeValue(null, "name");
+                String value = p.getAttributeValue(null, "value");
+                if (name == null || value == null || value.isEmpty()) continue;
+                int uid;
+                try { uid = Integer.parseInt(name); } catch (NumberFormatException e) { continue; } // "userkey" etc.
+                String[] pkgs = getPackageManager().getPackagesForUid(uid);
+                if (pkgs == null) continue;
+                for (String pkg : pkgs) {
+                    if (!pkg.startsWith(NUGGET_PACKAGE_PREFIX)) continue;
+                    JSONObject o = new JSONObject();
+                    o.put("package", pkg);
+                    o.put("uid", uid);
+                    o.put("android_id", value);
+                    byPkg.put(pkg, o);
+                }
+            }
+        } catch (Exception e) {
+            if (ssaidFileMtime == -1) Log.i(TAG, "Android IDs not readable (firmware without the sepolicy?): " + e.getMessage());
+        }
+        JSONArray out = new JSONArray();
+        for (JSONObject o : byPkg.values()) out.put(o);
+        ssaidCache = out;
+        ssaidReadable = ok;
+        ssaidFileMtime = mtime;
+        ssaidCachedAt = now;
+        return out;
+    }
 
     /**
      * The SoC's own serial as upper-case hex ("C45BCE30"), from the Qualcomm
