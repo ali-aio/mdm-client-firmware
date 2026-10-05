@@ -97,6 +97,9 @@ public class MdmService extends Service {
     // wall-clock time it switches itself off again (0 = stays on until told otherwise).
     private static final String ADB_TCP_PROP = "persist.sys.aio.adb_tcp_port";
     private static final String ADB_TCP_UNTIL_PROP = "persist.sys.aio.adb_tcp_until";
+    // Published only when getDeviceSerial() has a VALID_SERIAL; firmware's aio-serial.rc copies
+    // it to sys.serialnumber, which apps (Nugget) can read but ro.serialno (serialno_prop) not.
+    private static final String AIO_SERIAL_PROP = "persist.sys.aio.serial";
     private static final String PREFS_VERIFIER = "mdm_verifier";
     private static final String KEY_VERIFIER_SAVED = "saved_value";
 
@@ -3263,6 +3266,12 @@ public class MdmService extends Service {
             serialRaw = raw;
             if (raw != null && VALID_SERIAL.matcher(raw).matches()) {
                 deviceSerial = raw;
+                // Publish it where apps look for a serial (Nugget reads sys.serialnumber among
+                // others; see aio-serial.rc). Only a VALID_SERIAL is ever published here — a
+                // corrupted read (the androidboot.baseband=msm case below) never reaches this
+                // branch, so Nugget keeps falling back to its own Android ID in that case
+                // instead of adopting a shared, non-unique value.
+                SystemPropertiesProxy.set(AIO_SERIAL_PROP, raw);
             } else {
                 // A corrupted bootloader hands the kernel a command line with no serial on
                 // it, and ro.serialno picks up the next token instead — the fleet has seen
