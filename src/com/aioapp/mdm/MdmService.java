@@ -1598,6 +1598,16 @@ public class MdmService extends Service {
                 isCapturing = false;
                 releaseRemoteWakeLock();
                 break;
+            case "adb_tunnel_open": {
+                // An admin's `adb connect` reached the server: carry adbd (127.0.0.1:port)
+                // to it over a second WebSocket. See AdbTunnel and internal/adbtunnel.
+                AdbTunnel.open(apiService.getApiBaseUrl(), getDeviceSerial(), apiService.getApiKey(),
+                        msg.optString("session", ""), msg.optString("stream", ""), msg.optInt("port", 5555));
+                break;
+            }
+            case "adb_tunnel_close":
+                AdbTunnel.closeSession(msg.optString("session", ""));
+                break;
             case "start_logcat_stream": {
                 final JSONObject lcOpts = msg;
                 final String lcReq = msg.optString("request_id", "");
