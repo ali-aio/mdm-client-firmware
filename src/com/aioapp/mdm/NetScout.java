@@ -1,6 +1,8 @@
 package com.aioapp.mdm;
 
 import android.content.Context;
+import android.net.nsd.NsdManager;
+import android.net.nsd.NsdServiceInfo;
 import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
 import android.util.Log;
@@ -27,6 +29,9 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.CountDownLatch;
+import java.util.LinkedHashSet;
+import java.util.Set;
 
 /**
  * The scout: this device looks for other Android devices on its own Wi-Fi that trust the
@@ -59,7 +64,18 @@ public final class NetScout {
 
     private static final int ADB_PORT = 5555;
     private static final int PARALLEL = 16;
-    private static final int PORT_PROBE_MS = 400;   // a closed port RSTs in well under this
+    // 400ms is enough for a closed port to RST, and enough for an awake device to
+    // answer — but a device whose Wi-Fi radio is in power-save takes longer than that
+    // to get its first SYN-ACK out, and read as "closed". That silently lost real
+    // devices: a venue sweep reported "0 open" on a /24 with a listening device on it.
+    // So the sweep keeps the short budget for its first pass (254 hosts have to stay
+    // fast) and gives every non-responder a second, patient one; a scan aimed at a
+    // single host is patient from the start, because one host costs nothing.
+    private static final int PORT_PROBE_MS = 400;
+    private static final int PORT_PROBE_SLOW_MS = 1500;
+    private static final long MDNS_LISTEN_MS = 2500;    // long enough for a link to answer
+    private static final long MDNS_RESOLVE_MS = 1200;
+    private static volatile NsdManager mdns;
     private static final int ADB_CONNECT_MS = 3000;
     private static final int IO_MS = 8000;
     private static final long REFUSED_FOR_MS = 60 * 60 * 1000L;
@@ -100,13 +116,41 @@ public final class NetScout {
             return;
         }
         cancelled.remove(session);
+        if (mdns == null) {
+            try {
+                mdns = (NsdManager) ctx.getApplicationContext().getSystemService(Context.NSD_SERVICE);
+            } catch (Exception e) {
+                Log.w(TAG, "no NSD service: " + e.getMessage());
+            }
+        }
 
-        List<String> hosts = only.isEmpty() ? subnetHosts(ctx) : new ArrayList<>(List.of(only));
+        List<String> hosts;
+        if (only.isEmpty()) {
+            // Two ways of looking, because neither finds everything. The /24 sweep only
+            // covers this device's own third octet and skips .0 and .255 — a venue on
+            // more than one AP subnet (or a flat /16, like the lab) hides devices from
+            // it. mDNS is multicast on the local link and answers across those subnets,
+            // which is how the AIO Enroll desktop app finds devices without sweeping at
+            // all (`adb mdns services`). Union of the two, de-duplicated, sweep order
+            // first so the common case is unchanged.
+            Set<String> all = new LinkedHashSet<>(subnetHosts(ctx));
+            List<String> viaMdns = mdnsHosts();
+            int extra = 0;
+            for (String h : viaMdns) if (all.add(h)) extra++;
+            if (!viaMdns.isEmpty()) {
+                Log.i(TAG, "mDNS saw " + viaMdns.size() + " adb host(s), " + extra + " outside this /24");
+            }
+            hosts = new ArrayList<>(all);
+        } else {
+            hosts = new ArrayList<>(List.of(only));
+        }
         if (hosts.isEmpty()) { done(out, session, 0, 0, 0, "no Wi-Fi /24"); return; }
 
         final String self = localIp(ctx);
         final long now = System.currentTimeMillis();
         final List<String> open = new CopyOnWriteArrayList<>();
+        final List<String> quiet = new CopyOnWriteArrayList<>();   // did not answer in time
+        final int firstMs = only.isEmpty() ? PORT_PROBE_MS : PORT_PROBE_SLOW_MS;
         ExecutorService pool = Executors.newFixedThreadPool(PARALLEL);
         for (final String host : hosts) {
             if (host.equals(self)) continue;
@@ -114,10 +158,24 @@ public final class NetScout {
                 Long until = refusedUntil.get(host);
                 if (until != null && now < until) continue;
             }
-            pool.execute(() -> { if (portOpen(host, ADB_PORT)) open.add(host); });
+            pool.execute(() -> {
+                if (portOpen(host, ADB_PORT, firstMs)) open.add(host); else quiet.add(host);
+            });
         }
         pool.shutdown();
         try { pool.awaitTermination(30, TimeUnit.SECONDS); } catch (InterruptedException ignored) {}
+
+        // Second, patient pass over the hosts that said nothing. A radio in power-save
+        // misses the first budget and answers this one, which is the difference between
+        // finding a device and reporting an empty venue.
+        if (only.isEmpty() && !quiet.isEmpty() && !cancelled.containsKey(session)) {
+            ExecutorService slow = Executors.newFixedThreadPool(PARALLEL);
+            for (final String host : quiet) {
+                slow.execute(() -> { if (portOpen(host, ADB_PORT, PORT_PROBE_SLOW_MS)) open.add(host); });
+            }
+            slow.shutdown();
+            try { slow.awaitTermination(60, TimeUnit.SECONDS); } catch (InterruptedException ignored) {}
+        }
 
         int accepted = 0, refused = 0;
         for (String host : open) {
@@ -131,6 +189,13 @@ public final class NetScout {
             } catch (AdbClient.Refused r) {
                 refusedUntil.put(host, System.currentTimeMillis() + REFUSED_FOR_MS);
                 refused++;
+                // Still report it. adb answered, so there is an Android device here; it
+                // just has not accepted our key. `adb devices` calls this "unauthorized"
+                // and the Enroll app lists it, because somebody standing at the device
+                // can tap Allow (or the image can be rebuilt with the key) and then it
+                // enrols like any other. Nothing is known about it beyond its address —
+                // no props can be read without auth — so the frame carries no serial.
+                out.send(unauthorized(session, host, ADB_PORT, r.getMessage()));
                 Log.i(TAG, host + " refused the key: " + r.getMessage());
             } catch (IOException e) {
                 Log.w(TAG, host + " probe failed: " + e.getMessage());
@@ -328,6 +393,21 @@ public final class NetScout {
         out.send(f);
     }
 
+    /** A host that speaks adb but would not take our key: reported without a serial. */
+    private static JSONObject unauthorized(String session, String host, int port, String why) {
+        JSONObject f = new JSONObject();
+        try {
+            f.put("type", "net_sighting");
+            f.put("session", session);
+            f.put("host", host);
+            f.put("port", port);
+            f.put("serial", "");
+            f.put("auth", "refused");
+            f.put("reason", why == null ? "" : why);
+        } catch (Exception ignored) {}
+        return f;
+    }
+
     private static void done(Sender out, String session, int hosts, int open, int accepted, String err) {
         JSONObject f = new JSONObject();
         try {
@@ -344,8 +424,12 @@ public final class NetScout {
     // ── network helpers ───────────────────────────────────────────────────────────
 
     private static boolean portOpen(String host, int port) {
+        return portOpen(host, port, PORT_PROBE_MS);
+    }
+
+    private static boolean portOpen(String host, int port, int timeoutMs) {
         try (Socket s = new Socket()) {
-            s.connect(new InetSocketAddress(host, port), PORT_PROBE_MS);
+            s.connect(new InetSocketAddress(host, port), timeoutMs);
             return true;
         } catch (IOException e) {
             return false;
@@ -353,6 +437,66 @@ public final class NetScout {
     }
 
     /** Every address in this device's Wi-Fi /24 (the common case; wider masks are not swept). */
+    /**
+     * Addresses advertising adb over mDNS, the same services `adb mdns services` lists:
+     * {@code _adb._tcp} (adbd with TCP enabled, which is what our images do) and the
+     * two wireless-debugging ones. Multicast reaches the whole link, so this finds
+     * devices on another AP subnet that a /24 sweep can never see. Best effort and
+     * time-boxed — no result just means the sweep stands alone.
+     */
+    private static List<String> mdnsHosts() {
+        List<String> out = new ArrayList<>();
+        NsdManager nsd = mdns;
+        if (nsd == null) return out;
+        String[] types = {"_adb._tcp.", "_adb-tls-connect._tcp.", "_adb-tls-pairing._tcp."};
+        for (String type : types) {
+            final CountDownLatch settled = new CountDownLatch(1);
+            final List<NsdServiceInfo> found = new CopyOnWriteArrayList<>();
+            NsdManager.DiscoveryListener dl = new NsdManager.DiscoveryListener() {
+                public void onDiscoveryStarted(String t) {}
+                public void onStartDiscoveryFailed(String t, int code) { settled.countDown(); }
+                public void onStopDiscoveryFailed(String t, int code) { settled.countDown(); }
+                public void onDiscoveryStopped(String t) { settled.countDown(); }
+                public void onServiceFound(NsdServiceInfo info) { found.add(info); }
+                public void onServiceLost(NsdServiceInfo info) {}
+            };
+            try {
+                nsd.discoverServices(type, NsdManager.PROTOCOL_DNS_SD, dl);
+            } catch (IllegalArgumentException | SecurityException e) {
+                Log.w(TAG, "mDNS " + type + ": " + e.getMessage());
+                continue;
+            }
+            try { Thread.sleep(MDNS_LISTEN_MS); } catch (InterruptedException ignored) {}
+            try { nsd.stopServiceDiscovery(dl); } catch (IllegalArgumentException ignored) {}
+            try { settled.await(1, TimeUnit.SECONDS); } catch (InterruptedException ignored) {}
+            // A found service carries a name, not an address, until it is resolved; the
+            // name adbd advertises is usually "adb-<serial>", so resolve for the host.
+            for (NsdServiceInfo info : found) {
+                String host = resolveHost(nsd, info);
+                if (host != null && !host.isEmpty() && !out.contains(host)) out.add(host);
+            }
+        }
+        return out;
+    }
+
+    private static String resolveHost(NsdManager nsd, NsdServiceInfo info) {
+        final String[] host = new String[1];
+        final CountDownLatch done = new CountDownLatch(1);
+        try {
+            nsd.resolveService(info, new NsdManager.ResolveListener() {
+                public void onResolveFailed(NsdServiceInfo i, int code) { done.countDown(); }
+                public void onServiceResolved(NsdServiceInfo i) {
+                    if (i.getHost() != null) host[0] = i.getHost().getHostAddress();
+                    done.countDown();
+                }
+            });
+            done.await(MDNS_RESOLVE_MS, TimeUnit.MILLISECONDS);
+        } catch (Exception e) {
+            Log.w(TAG, "mDNS resolve: " + e.getMessage());
+        }
+        return host[0];
+    }
+
     private static List<String> subnetHosts(Context ctx) {
         List<String> out = new ArrayList<>();
         String ip = localIp(ctx);
