@@ -90,6 +90,16 @@ public final class NetScout {
 
     private static final Map<String, Long> refusedUntil = new ConcurrentHashMap<>();
     private static final Map<String, Boolean> cancelled = new ConcurrentHashMap<>();
+    /**
+     * One scan at a time on this device. MdmService hands every net_scan to a pool with
+     * room for 16 threads, so without this a second frame starts a second sweep: another
+     * 16 probe sockets, another set of mDNS listeners, and both of them writing the
+     * static maps above. Overlapping scans were also losing their results — a frame
+     * aimed at one host, sent while a sweep ran, never reported back at all. A rejected
+     * scan is answered, never dropped silently.
+     */
+    private static final java.util.concurrent.atomic.AtomicBoolean scanning =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
 
     private NetScout() {}
 
@@ -106,6 +116,19 @@ public final class NetScout {
      */
     public static void scan(Context ctx, JSONObject msg, Sender out) {
         final String session = msg.optString("session", "");
+        if (!scanning.compareAndSet(false, true)) {
+            Log.i(TAG, "scan " + session + " refused: one already running");
+            done(out, session, 0, 0, 0, "a scan is already running on this device");
+            return;
+        }
+        try {
+            scanLocked(ctx, msg, out, session);
+        } finally {
+            scanning.set(false);
+        }
+    }
+
+    private static void scanLocked(Context ctx, JSONObject msg, Sender out, final String session) {
         final String only = msg.optString("host", "");
         final long t0 = System.currentTimeMillis();
         final PrivateKey key;
