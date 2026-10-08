@@ -847,6 +847,16 @@ public class MdmService extends Service {
         ackCommand(cmdId, serial, status, output, null);
     }
 
+    /** A NetScout frame (sighting / scan-done / enrol progress) back to the server over the
+     *  command WS. Dropped if the socket is down: a scan is retried from the server, and a
+     *  half-reported scan is harmless — the next one supersedes it. */
+    private void sendScoutFrame(JSONObject frame) {
+        MdmWebSocketClient ws = wsClient;
+        if (ws == null || !ws.isConnected()) { Log.w(TAG, "scout frame dropped (WS down)"); return; }
+        try { ws.send(frame.toString()); }
+        catch (Exception e) { Log.w(TAG, "scout frame send failed: " + e.getMessage()); }
+    }
+
     /** pkg (nullable) is the package an install produced — reported on 'installed' so
      *  the server can reconcile a stuck install against the device's package list. */
     private void ackCommand(String cmdId, String serial, String status, String output, String pkg) {
@@ -1608,6 +1618,29 @@ public class MdmService extends Service {
             case "adb_tunnel_close":
                 AdbTunnel.closeSession(msg.optString("session", ""));
                 break;
+            case "net_scan": {
+                // Scout: sweep this device's Wi-Fi for devices that trust the fleet adb key
+                // and report what each one is. See NetScout and the sightings table.
+                final JSONObject scanMsg = msg;
+                heavyExecutor.submit(() -> {
+                    try { NetScout.scan(MdmService.this, scanMsg, this::sendScoutFrame); }
+                    catch (Exception e) { Log.e(TAG, "net_scan error: " + e.getMessage()); }
+                });
+                break;
+            }
+            case "net_scan_cancel":
+                NetScout.cancelScan(msg.optString("session", ""));
+                break;
+            case "net_enroll": {
+                // Scout: install the standard client on one device on the Wi-Fi and make it
+                // Device Owner, with the one-shot token the server minted.
+                final JSONObject enrollMsg = msg;
+                heavyExecutor.submit(() -> {
+                    try { NetScout.enroll(MdmService.this, enrollMsg, this::sendScoutFrame); }
+                    catch (Exception e) { Log.e(TAG, "net_enroll error: " + e.getMessage()); }
+                });
+                break;
+            }
             case "start_logcat_stream": {
                 final JSONObject lcOpts = msg;
                 final String lcReq = msg.optString("request_id", "");
