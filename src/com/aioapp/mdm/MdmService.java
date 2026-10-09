@@ -966,6 +966,9 @@ public class MdmService extends Service {
 
     /** Command poll cadence while there is no usable socket. See startCommandPoller. */
     private static final long COMMAND_POLL_MS = 60_000L;
+    /** Poll at least this often even with a healthy socket — see the floor check below. */
+    private static final long COMMAND_POLL_FLOOR_MS = 5 * 60_000L;
+    private volatile long lastCommandPollAt = 0L;
     private ScheduledExecutorService commandPoller;
     /** Set by a server "wake" frame (and after a terminal ack) to poll on the next tick. */
     private final AtomicBoolean pollCommandsNow = new AtomicBoolean(false);
@@ -998,9 +1001,16 @@ public class MdmService extends Service {
                 if (!running || !networkAvailable || !remoteConfigLoaded) return;
                 boolean wsUsable = wsClient != null && wsClient.isConnected()
                         && wsClient.getSecsSinceLastData() <= STALE_WS_THRESHOLD_SECS;
+                // A healthy socket is not proof that frames are arriving: a half-open one
+                // reads as connected and swallows every wake, which is precisely how a
+                // device ends up queued-but-untouched. So even a healthy socket is polled
+                // at a floor cadence, and that floor is the worst case for a swallowed
+                // wake — minutes, not forever.
+                boolean floorDue = SystemClock.elapsedRealtime() - lastCommandPollAt >= COMMAND_POLL_FLOOR_MS;
                 // A wake frame (or a command that just finished, which may have been
-                // holding the queue) overrides the socket check: poll once, now.
-                if (wsUsable && !pollCommandsNow.getAndSet(false)) return;
+                // holding its lane) overrides the socket check: poll once, now.
+                if (wsUsable && !floorDue && !pollCommandsNow.getAndSet(false)) return;
+                lastCommandPollAt = SystemClock.elapsedRealtime();
                 pollCommandsNow.set(false);
                 JSONObject resp = apiService.fetchPendingCommands(getDeviceSerial());
                 if (resp != null) runHttpCommands(resp);
@@ -1013,6 +1023,26 @@ public class MdmService extends Service {
     /** Poll on the next tick rather than waiting out the interval. */
     private void pollCommandsSoon() {
         pollCommandsNow.set(true);
+    }
+
+    /**
+     * Fetch now, off the socket thread. A wake frame means the server already has work
+     * queued, so waiting out the poll interval would throw away the whole point of being
+     * told — the first version of this only set the flag, and a command to a connected
+     * device still took up to a minute (AT070AA2600024: 83s, measured on stage).
+     */
+    private void pollCommandsNow() {
+        pollCommandsNow.set(true);
+        executor.submit(() -> {
+            try {
+                if (!running || !networkAvailable) return;
+                pollCommandsNow.set(false);
+                JSONObject resp = apiService.fetchPendingCommands(getDeviceSerial());
+                if (resp != null) runHttpCommands(resp);
+            } catch (Exception e) {
+                Log.w(TAG, "immediate command poll: " + e.getMessage());
+            }
+        });
     }
 
     /**
@@ -1807,7 +1837,7 @@ public class MdmService extends Service {
                 // it instead of the command itself to clients that can fetch their own
                 // work, which is what makes a half-open socket harmless.
                 Log.i(TAG, "Wake from server (" + msg.optString("reason", "") + ") — polling for commands");
-                pollCommandsSoon();
+                pollCommandsNow();
                 break;
             case "checkin_now":
                 // Server nudge (e.g. an OTA was just assigned): do a full HTTP check-in
