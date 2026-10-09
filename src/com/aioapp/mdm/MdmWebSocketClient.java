@@ -114,8 +114,15 @@ public class MdmWebSocketClient {
         while (running) {
             try {
                 connect();
-            } catch (Exception e) {
-                Log.w(TAG, "Connection error: " + e.getMessage());
+            } catch (Throwable t) {
+                // Throwable, not Exception: an Error here (an OOM on a big frame, a linkage
+                // error, anything the socket/TLS layer throws that isn't an Exception) used to
+                // escape this catch and end the thread for good. Nothing restarts it — the
+                // process stays alive and healthy-looking, the watchdog only checks that
+                // MdmService runs, and startWebSocket() returns early while wsClient is
+                // non-null — so the device went silently command-less until a reboot
+                // (AT070AABU00077, 2026-10-09: 15h up, zero dial attempts, HTTP fine).
+                Log.w(TAG, "Connection error: " + t);
             } finally {
                 closeSocket();
             }
@@ -131,9 +138,24 @@ public class MdmWebSocketClient {
             try {
                 Thread.sleep(delay);
             } catch (InterruptedException e) {
-                break;
+                // Only stop() means stop. A stray interrupt from anywhere else used to break
+                // out of the loop with running still true, killing reconnects permanently.
+                if (!running) break;
+                Thread.interrupted(); // clear the flag so the next socket read isn't killed by it
+                Log.w(TAG, "Backoff sleep interrupted but still running — continuing to reconnect");
             }
         }
+        Log.w(TAG, "connectLoop exiting (running=" + running + ")");
+    }
+
+    /**
+     * Whether the reconnect loop is still alive. A dead loop is terminal on its own — see the
+     * Throwable catch above — so MdmService polls this and calls restartWebSocket() when the
+     * thread is gone but this object is still in place.
+     */
+    public boolean isLoopAlive() {
+        Thread t = loopThread;
+        return t != null && t.isAlive();
     }
 
     private void connect() throws Exception {

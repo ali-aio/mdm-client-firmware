@@ -806,6 +806,20 @@ public class MdmService extends Service {
             } else {
                 sendTelemetryOverWs();
             }
+        } else if (wsClient != null && !wsClient.isLoopAlive()) {
+            // The reconnect loop is gone but this object is still here, so startWebSocket()
+            // would return early and the device would hold no socket for the rest of its
+            // uptime: no commands, no OTA, Offline on the dashboard, telemetry still flowing
+            // over the HTTP safety net so nothing looks wrong. Found on AT070AABU00077
+            // (2026-10-09): 15h of uptime, not one WS dial reaching the server.
+            Log.w(TAG, "WS loop thread is dead — restarting the WebSocket client");
+            executor.submit(this::restartWebSocket);
+        } else if (wsClient == null && remoteConfigLoaded && networkAvailable) {
+            // onAvailable fires once per network and is the only thing that ever starts the
+            // socket; if it was missed (or its task died before startWebSocket), nothing else
+            // tries again. This tick is that second chance.
+            Log.w(TAG, "No WebSocket client but the network is up — starting it");
+            executor.submit(this::startWebSocket);
         }
         // HTTP safety net: always checkin via HTTP every 5 minutes regardless of WS state
         if ((now - lastHttpCheckinAt) >= HTTP_SAFETY_NET_MS) {
@@ -3746,6 +3760,10 @@ public class MdmService extends Service {
     // from -1 (charging off / unreadable).
     private static final int WLC_STATUS_FLAPPING = 2;
 
+    // Last settled WLC value we logged at debug, so the ~1.3s watcher only writes a line when
+    // the value actually changes (watcher thread only, like the rest of the settle state).
+    private int lastLoggedSettledWlc = Integer.MIN_VALUE;
+
     /** Burst-samples gpio27 over ~WLC_SETTLE_READS*WLC_SETTLE_STEP_MS and classifies by edge
      *  count in that raw sequence (mirrors tools/wlc-check.sh's classify()) — see the
      *  WLC_SETTLE_* field comments for why this replaced a "3 consecutive reads agree"
@@ -3773,8 +3791,18 @@ public class MdmService extends Service {
                     + " reads (~" + (reads * WLC_SETTLE_STEP_MS) + "ms window)");
             return WLC_STATUS_FLAPPING;
         }
-        Log.d(TAG, "readSettledWlc: settled=" + last + " (" + edges + " edge(s) across "
-                + reads + " reads)");
+        // Only when it changed, and at verbose: the watcher calls this every ~1.3s, and logging
+        // every settled read held the whole main logcat buffer to about two minutes on a T7 —
+        // every line older than that was gone before anyone could pull it, which is what made
+        // the dead-WS-thread bug above impossible to post-mortem in the field.
+        if (last != lastLoggedSettledWlc) {
+            lastLoggedSettledWlc = last;
+            Log.d(TAG, "readSettledWlc: settled=" + last + " (" + edges + " edge(s) across "
+                    + reads + " reads)");
+        } else {
+            Log.v(TAG, "readSettledWlc: settled=" + last + " (" + edges + " edge(s) across "
+                    + reads + " reads)");
+        }
         return last; // best effort (may be -1 if every read was unreadable)
     }
 
