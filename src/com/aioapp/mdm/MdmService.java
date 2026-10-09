@@ -557,6 +557,7 @@ public class MdmService extends Service {
             startWlcWatcher();
             applySavedWlcCharging(); // sysfs resets to on across reboot — restore the saved choice
         }
+        startCommandPoller();
         // Mic gain enforcement target (debug prop) resets on boot — restore the saved one.
         executor.submit(() -> MicGain.applySavedTarget(MdmService.this));
     }
@@ -963,6 +964,57 @@ public class MdmService extends Service {
         });
     }
 
+    /** Command poll cadence while there is no usable socket. See startCommandPoller. */
+    private static final long COMMAND_POLL_MS = 60_000L;
+    private ScheduledExecutorService commandPoller;
+    /** Set by a server "wake" frame (and after a terminal ack) to poll on the next tick. */
+    private final AtomicBoolean pollCommandsNow = new AtomicBoolean(false);
+
+    /**
+     * Ask the server for queued commands, on its own cadence, independent of telemetry.
+     *
+     * Commands used to arrive only over the WebSocket, so a client whose socket died could
+     * not be reached at all — it kept checking in, looked healthy on every page, and ran
+     * nothing sent to it (AT070AABU00077, 9 Oct 2026: 15 hours, a shell command stuck at
+     * 'delivered', fixed only by a reboot). Asking is the half a device can always do.
+     *
+     * Deliberately NOT the check-in schedule. Command latency and telemetry volume are
+     * different problems: making check-ins minutely to carry commands would multiply the
+     * fleet's telemetry writes by five to fix a delivery bug. So telemetry keeps its
+     * five-minute keyframe and this loop owns command latency.
+     *
+     * While the socket is healthy this does nothing — the server sends a "wake" frame when
+     * there is work, which is instant and cheaper than polling. The loop is what covers the
+     * case where that frame can never arrive.
+     */
+    private void startCommandPoller() {
+        commandPoller = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "mdm-cmd-poll");
+            t.setDaemon(true);
+            return t;
+        });
+        commandPoller.scheduleWithFixedDelay(() -> {
+            try {
+                if (!running || !networkAvailable || !remoteConfigLoaded) return;
+                boolean wsUsable = wsClient != null && wsClient.isConnected()
+                        && wsClient.getSecsSinceLastData() <= STALE_WS_THRESHOLD_SECS;
+                // A wake frame (or a command that just finished, which may have been
+                // holding the queue) overrides the socket check: poll once, now.
+                if (wsUsable && !pollCommandsNow.getAndSet(false)) return;
+                pollCommandsNow.set(false);
+                JSONObject resp = apiService.fetchPendingCommands(getDeviceSerial());
+                if (resp != null) runHttpCommands(resp);
+            } catch (Exception e) {
+                Log.w(TAG, "command poll tick: " + e.getMessage());
+            }
+        }, 15_000L, COMMAND_POLL_MS, TimeUnit.MILLISECONDS);
+    }
+
+    /** Poll on the next tick rather than waiting out the interval. */
+    private void pollCommandsSoon() {
+        pollCommandsNow.set(true);
+    }
+
     /**
      * Commands handed back in a check-in response — the backup command channel.
      *
@@ -1006,6 +1058,9 @@ public class MdmService extends Service {
 
     private void markCommandDone(String cmdId) {
         inFlightCommands.remove(cmdId);
+        // This command may have been holding its lane, so the next one only becomes
+        // deliverable now. Ask again rather than idling for a minute.
+        pollCommandsSoon();
         synchronized (recentDoneCommands) {
             recentDoneCommands.remove(cmdId);
             recentDoneCommands.add(cmdId);
@@ -1746,6 +1801,14 @@ public class MdmService extends Service {
                 }
                 break;
             }
+            case "wake":
+                // "There is work, come and get it" — no payload, so losing this frame costs
+                // at most one poll interval instead of losing a command. The server sends
+                // it instead of the command itself to clients that can fetch their own
+                // work, which is what makes a half-open socket harmless.
+                Log.i(TAG, "Wake from server (" + msg.optString("reason", "") + ") — polling for commands");
+                pollCommandsSoon();
+                break;
             case "checkin_now":
                 // Server nudge (e.g. an OTA was just assigned): do a full HTTP check-in
                 // immediately so the update resolves now instead of on the next periodic
@@ -4109,6 +4172,7 @@ public class MdmService extends Service {
         executor.shutdownNow();
         if (heavyExecutor != null) heavyExecutor.shutdownNow();
         if (wlcWatcher != null) wlcWatcher.shutdownNow();
+        if (commandPoller != null) commandPoller.shutdownNow();
         if (wifiScanExecutor != null) wifiScanExecutor.shutdownNow();
         if (wsClient != null) wsClient.stop();
         if (networkCallback != null) {

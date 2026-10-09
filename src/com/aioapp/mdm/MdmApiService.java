@@ -385,6 +385,79 @@ public class MdmApiService {
         return r;
     }
 
+    /**
+     * GET /api/v1/commands/pending?serial=… — the device asking for its own work.
+     *
+     * The WebSocket used to be the only way a command could arrive, so a client whose
+     * socket had died could not be reached at all: it kept checking in, looked healthy,
+     * and ran nothing that was sent to it (AT070AABU00077, 9 Oct 2026 — 15h, with a shell
+     * command stuck at 'delivered'). Asking is the half the device can always do.
+     *
+     * Returns the parsed body, or null on any failure — a failed poll is a no-op, the next
+     * one is a minute away.
+     */
+    public JSONObject fetchPendingCommands(String serial) {
+        try {
+            String body = doGet("/api/v1/commands/pending?serial="
+                    + java.net.URLEncoder.encode(serial, "UTF-8"));
+            if (body == null || body.isEmpty()) return null;
+            return new JSONObject(body);
+        } catch (Exception e) {
+            Log.w(TAG, "command poll failed: " + e.getMessage());
+            return null;
+        }
+    }
+
+    /** Bare GET with the device key. Returns the body on 2xx, else null. */
+    private String doGet(String endpoint) throws Exception {
+        String key = apiKey;
+        GetResult r = doGet(endpoint, key);
+        // Same handling as doPost: a 401 to our own key means the server no longer has it
+        // (a restore, or an admin reset after this device lost and regained it). Forget it
+        // so the next check-in registers a new one; this poll just returns nothing.
+        if (r.code == HttpURLConnection.HTTP_UNAUTHORIZED && usingOwnKey() && key.equals(apiKey)) {
+            Log.w(TAG, "Server refused this device's own key on a command poll; back to the shared key");
+            DeviceKey k = deviceKey;
+            if (k != null) k.forget();
+            keyChanged();
+        }
+        return (r.code >= 200 && r.code < 300) ? r.body : null;
+    }
+
+    private static final class GetResult {
+        final int code; final String body;
+        GetResult(int code, String body) { this.code = code; this.body = body; }
+    }
+
+    private GetResult doGet(String endpoint, String key) throws Exception {
+        URL url = new URL(apiBaseUrl + endpoint);
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        conn.setRequestMethod("GET");
+        conn.setRequestProperty("X-API-Key", key);
+        conn.setConnectTimeout(10_000);
+        conn.setReadTimeout(30_000);
+        int code = conn.getResponseCode();
+        StringBuilder sb = new StringBuilder();
+        java.io.InputStream stream = code >= 400 ? conn.getErrorStream() : conn.getInputStream();
+        if (stream != null) {
+            try (BufferedReader br = new BufferedReader(
+                    new InputStreamReader(stream, StandardCharsets.UTF_8))) {
+                String line;
+                // Same 256 KB cap as doPost: a command list must not be able to OOM the service.
+                while ((line = br.readLine()) != null && sb.length() <= 256 * 1024) sb.append(line);
+            } catch (Exception ignored) {}
+        }
+        if (code == 429 || code == HttpURLConnection.HTTP_UNAVAILABLE) {
+            // Respect a server asking for quiet: the poll loop reads the same budget the
+            // check-in path does, so one back-off covers both.
+            try {
+                int secs = Integer.parseInt(conn.getHeaderField("Retry-After").trim());
+                if (secs > 0) retryAfterMs = Math.max(retryAfterMs, secs * 1000L);
+            } catch (Exception ignored) {}
+        }
+        return new GetResult(code, sb.toString());
+    }
+
     private PostResult doPost(String endpoint, String jsonBody, String key) throws Exception {
         URL url = new URL(apiBaseUrl + endpoint);
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
