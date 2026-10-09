@@ -359,11 +359,15 @@ public final class NetScout {
 
         File apk = new File(ctx.getCacheDir(), "scout-dpc.apk");
         AdbClient c = null;
+        // Which key let us in. It goes back with the result: this is the device whose image
+        // we just proved carries that key, and the server keeps it against the serial.
+        String usedLabel = "";
         try {
             AdbClient.Refused last = null;
             for (Keyed k : keys) {
                 try {
                     c = AdbClient.connect(host, port, k.key, ADB_CONNECT_MS, IO_MS);
+                    usedLabel = k.label;
                     Log.i(TAG, host + " enrolling with the " + k.label + " key");
                     break;
                 } catch (AdbClient.Refused r) {
@@ -412,7 +416,7 @@ public final class NetScout {
             // hint. Report them as reached so the row advances; the server has the truth.
             step(out, job, 6);
             step(out, job, 7);
-            enrollDone(out, job, true, serial);
+            enrollDone(out, job, true, serial, usedLabel);
         } catch (AdbClient.Refused r) {
             enrollDone(out, job, false, "device refused the key: " + r.getMessage());
         } catch (IOException e) {
@@ -470,6 +474,11 @@ public final class NetScout {
     }
 
     private static void enrollDone(Sender out, String job, boolean ok, String reasonOrSerial) {
+        enrollDone(out, job, ok, reasonOrSerial, "");
+    }
+
+    /** @param keyLabel which of our keys got us into the device, "" when none did. */
+    private static void enrollDone(Sender out, String job, boolean ok, String reasonOrSerial, String keyLabel) {
         JSONObject f = new JSONObject();
         try {
             f.put("type", "net_enroll_done");
@@ -477,6 +486,7 @@ public final class NetScout {
             f.put("ok", ok);
             if (ok) f.put("serial", reasonOrSerial);
             else f.put("reason", reasonOrSerial);
+            if (!keyLabel.isEmpty()) f.put("key_label", keyLabel);
         } catch (Exception ignored) {}
         out.send(f);
     }
