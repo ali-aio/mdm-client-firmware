@@ -821,7 +821,12 @@ public class MdmService extends Service {
             Log.w(TAG, "No WebSocket client but the network is up — starting it");
             executor.submit(this::startWebSocket);
         }
-        // HTTP safety net: always checkin via HTTP every 5 minutes regardless of WS state
+        // HTTP safety net: always checkin via HTTP every 5 minutes regardless of WS state.
+        // Command delivery is NOT this schedule's job — telemetry cadence and command
+        // latency are different problems, and making check-ins minutely to carry commands
+        // would multiply the fleet's telemetry writes by five to fix a delivery bug. The
+        // response still carries any pending command it happens to find (runHttpCommands),
+        // which is a free backup; the minute-by-minute command poll is its own loop.
         if ((now - lastHttpCheckinAt) >= HTTP_SAFETY_NET_MS) {
             lastHttpCheckinAt = now;
             executor.submit(() -> {
@@ -838,6 +843,7 @@ public class MdmService extends Service {
                         if (response.optBoolean("send_apps", false)) sendFullAppList = true;
                         JSONObject config = response.optJSONObject("config");
                         if (config != null) applyConfig(config);
+                        runHttpCommands(response);
                         maybeRegisterDeviceKey();
                         serverReachable = true;
                         flushOfflineQueue();
@@ -955,6 +961,42 @@ public class MdmService extends Service {
                 markCommandDone(cmdId);
             }
         });
+    }
+
+    /**
+     * Commands handed back in a check-in response — the backup command channel.
+     *
+     * This client took commands over the WebSocket only (the HTTP command parse was
+     * dropped in 56b160e), so a device whose socket was gone could not be reached at all:
+     * it kept checking in, looked alive on every page, and ran nothing that was sent to it
+     * (AT070AABU00077, 9 Oct 2026 — 15h of check-ins, a shell command stuck at
+     * 'delivered'). The server now puts pending commands in the response whenever this
+     * device holds no socket and said it reads them (extra.http_commands).
+     *
+     * Everything downstream is shared with the WS path: handleIncomingCommand acks receipt
+     * over HTTP, dedups by id against in-flight and recently-done commands, and runs on
+     * heavyExecutor. Results, progress and OTA status already go over HTTP. So a command
+     * delivered this way behaves exactly like a pushed one, only later.
+     */
+    private void runHttpCommands(JSONObject response) {
+        JSONArray cmds = response.optJSONArray("commands");
+        if (cmds == null || cmds.length() == 0) return;
+        Log.i(TAG, "Check-in carried " + cmds.length() + " command(s) over HTTP (no socket)");
+        for (int i = 0; i < cmds.length(); i++) {
+            JSONObject cmd = cmds.optJSONObject(i);
+            if (cmd == null) continue;
+            try {
+                // The HTTP shape names the type "type" (what MDM-lite reads) as well as
+                // "command_type" (the WS field); normalise so processWsCommand — the same
+                // code for both transports — sees the shape it expects.
+                if (!cmd.has("command_type")) {
+                    cmd.put("command_type", cmd.optString("type", "install_apk"));
+                }
+                handleIncomingCommand(cmd);
+            } catch (Exception e) {
+                Log.e(TAG, "HTTP command " + cmd.optString("id", "?") + " error: " + e.getMessage());
+            }
+        }
     }
 
     /** Confirm receipt of a command (before/independent of executing it). */
@@ -1311,6 +1353,7 @@ public class MdmService extends Service {
                         rememberSent(payload.getJSONObject("extra"), payload.optInt("battery_pct", -1));
                         JSONObject config = response.optJSONObject("config");
                         if (config != null) applyConfig(config);
+                        runHttpCommands(response);
                     }
                 } catch (Exception e2) {
                     Log.e(TAG, "HTTP telemetry fallback error: " + e2.getMessage());
@@ -2898,6 +2941,10 @@ public class MdmService extends Service {
         extra.put("agent_package", SELF_PACKAGE);
         extra.put("agent_version", clientVersionName());
         extra.put("agent_version_code", clientVersionCode());
+        // This client runs commands handed back in a check-in response. The server reads it
+        // to decide whether to use the response as a command channel for a device with no
+        // socket — the gate follows what the device can do, not a server-wide flag.
+        extra.put("http_commands", true);
         // The Android IDs the Nugget apps see, which only the OS knows (see getNuggetAndroidIds).
         JSONArray nuggetIds = getNuggetAndroidIds();
         if (nuggetIds.length() > 0) extra.put("app_android_ids", nuggetIds);
