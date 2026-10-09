@@ -7,6 +7,7 @@ import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
 import android.util.Log;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.File;
@@ -107,6 +108,45 @@ public final class NetScout {
         if (session != null && !session.isEmpty()) cancelled.put(session, Boolean.TRUE);
     }
 
+    /**
+     * One adb key with the name the server gave it. There is a key per vendor, because a key
+     * is baked into a device's image and can only be changed by a firmware release — so the
+     * one a device accepts says which build it is running. We report that name back.
+     */
+    private static final class Keyed {
+        final String label;
+        final PrivateKey key;
+        Keyed(String label, PrivateKey key) { this.label = label; this.key = key; }
+    }
+
+    /**
+     * The keys in a frame: {@code keys:[{label,key_pem}]}, or the single {@code key_pem} a
+     * server older than vendor keys sends. Empty when none of them parse.
+     */
+    private static List<Keyed> keysOf(JSONObject msg) {
+        List<Keyed> out = new ArrayList<>();
+        JSONArray arr = msg.optJSONArray("keys");
+        if (arr != null) {
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject k = arr.optJSONObject(i);
+                if (k == null) continue;
+                try {
+                    out.add(new Keyed(k.optString("label", "default"), AdbClient.parsePem(k.optString("key_pem", ""))));
+                } catch (IOException e) {
+                    Log.w(TAG, "key " + k.optString("label") + " will not parse: " + e.getMessage());
+                }
+            }
+        }
+        if (out.isEmpty()) {
+            try {
+                out.add(new Keyed("default", AdbClient.parsePem(msg.optString("key_pem", ""))));
+            } catch (IOException e) {
+                Log.w(TAG, "key will not parse: " + e.getMessage());
+            }
+        }
+        return out;
+    }
+
     // ── scan ────────────────────────────────────────────────────────────────────────
 
     /**
@@ -131,11 +171,9 @@ public final class NetScout {
     private static void scanLocked(Context ctx, JSONObject msg, Sender out, final String session) {
         final String only = msg.optString("host", "");
         final long t0 = System.currentTimeMillis();
-        final PrivateKey key;
-        try {
-            key = AdbClient.parsePem(msg.optString("key_pem", ""));
-        } catch (IOException e) {
-            done(out, session, 0, 0, 0, "bad key: " + e.getMessage());
+        final List<Keyed> keys = keysOf(msg);
+        if (keys.isEmpty()) {
+            done(out, session, 0, 0, 0, "bad key: none of the keys in the frame parse");
             return;
         }
         cancelled.remove(session);
@@ -205,10 +243,25 @@ public final class NetScout {
             if (cancelled.containsKey(session)) break;
             AdbClient c = null;
             try {
-                c = AdbClient.connect(host, ADB_PORT, key, ADB_CONNECT_MS, IO_MS);
+                // A device trusts one key: whichever was in its image. Offer them in turn,
+                // and report the one it took — that is what says whose build it is.
+                AdbClient.Refused last = null;
+                String label = "";
+                for (Keyed k : keys) {
+                    try {
+                        c = AdbClient.connect(host, ADB_PORT, k.key, ADB_CONNECT_MS, IO_MS);
+                        label = k.label;
+                        break;
+                    } catch (AdbClient.Refused r) {
+                        last = r;
+                    }
+                }
+                if (c == null) throw last != null ? last : new AdbClient.Refused("no key was accepted");
                 JSONObject s = probe(c, host, ADB_PORT, session);
+                try { s.put("key_label", label); } catch (Exception ignored) {}
                 out.send(s);
                 accepted++;
+                Log.i(TAG, host + " accepted the " + label + " key");
             } catch (AdbClient.Refused r) {
                 refusedUntil.put(host, System.currentTimeMillis() + REFUSED_FOR_MS);
                 refused++;
@@ -219,7 +272,7 @@ public final class NetScout {
                 // enrols like any other. Nothing is known about it beyond its address —
                 // no props can be read without auth — so the frame carries no serial.
                 out.send(unauthorized(session, host, ADB_PORT, r.getMessage()));
-                Log.i(TAG, host + " refused the key: " + r.getMessage());
+                Log.i(TAG, host + " refused every key: " + r.getMessage());
             } catch (IOException e) {
                 Log.w(TAG, host + " probe failed: " + e.getMessage());
             } finally {
@@ -297,15 +350,27 @@ public final class NetScout {
         final String apkUrl = msg.optString("apk_url", "");
         final String apkSha = msg.optString("apk_sha256", "");
 
-        PrivateKey key;
-        try {
-            key = AdbClient.parsePem(msg.optString("key_pem", ""));
-        } catch (IOException e) { enrollDone(out, job, false, "bad key: " + e.getMessage()); return; }
+        final List<Keyed> keys = keysOf(msg);
+        if (keys.isEmpty()) { enrollDone(out, job, false, "bad key: none of the keys in the frame parse"); return; }
+        // The key this device took when the scan found it goes first; the rest are the
+        // fallback for a device whose image has been changed since.
+        final String want = msg.optString("key_label", "");
+        keys.sort((a, b) -> Boolean.compare(!a.label.equals(want), !b.label.equals(want)));
 
         File apk = new File(ctx.getCacheDir(), "scout-dpc.apk");
         AdbClient c = null;
         try {
-            c = AdbClient.connect(host, port, key, ADB_CONNECT_MS, IO_MS);
+            AdbClient.Refused last = null;
+            for (Keyed k : keys) {
+                try {
+                    c = AdbClient.connect(host, port, k.key, ADB_CONNECT_MS, IO_MS);
+                    Log.i(TAG, host + " enrolling with the " + k.label + " key");
+                    break;
+                } catch (AdbClient.Refused r) {
+                    last = r;
+                }
+            }
+            if (c == null) throw last != null ? last : new AdbClient.Refused("no key was accepted");
 
             step(out, job, 0);                       // Checking the device
             JSONObject s = probe(c, host, port, "");
