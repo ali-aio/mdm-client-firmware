@@ -1359,6 +1359,10 @@ public class MdmService extends Service {
      *  connection silently dropped every progress report, leaving the dashboard
      *  percent stuck even though the device was actively downloading the whole time. */
     private void sendOtaProgressFrame(String cmdId, String phase, int percent) {
+        sendOtaProgressFrame(cmdId, phase, percent, 0L, 0L);
+    }
+
+    private void sendOtaProgressFrame(String cmdId, String phase, int percent, long done, long total) {
         if (cmdId == null) return;
         if (wsClient != null && wsClient.isConnected()) {
             try {
@@ -1367,13 +1371,34 @@ public class MdmService extends Service {
                 frame.put("command_id", cmdId);
                 frame.put("phase", phase);
                 frame.put("percent", percent);
+                if (done > 0) frame.put("bytes", done);
+                if (total > 0) frame.put("bytes_total", total);
                 wsClient.send(frame.toString());
                 return;
             } catch (Exception e) {
                 Log.e(TAG, "Failed to send OTA progress frame, falling back to HTTP: " + e.getMessage());
             }
         }
-        executor.submit(() -> apiService.postOtaProgress(getDeviceSerial(), cmdId, phase, percent));
+        executor.submit(() -> apiService.postOtaProgress(getDeviceSerial(), cmdId, phase, percent, done, total));
+    }
+
+    /** "Updating your device… 412 MB of 1.6 GB" where the figures are known, else a
+     *  percent. The same reasoning as the dashboard's: a percent that moves once per
+     *  twenty megabytes looks like nothing is happening. */
+    private static String otaNotificationText(String phase, int percent) {
+        return "Updating your device… " + percent + "%";
+    }
+
+    private static String otaNotificationText(int percent, long done, long total) {
+        if (done > 0 && total > 0) {
+            return "Updating your device… " + humanMB(done) + " of " + humanMB(total);
+        }
+        return "Updating your device… " + percent + "%";
+    }
+
+    private static String humanMB(long n) {
+        if (n < (1L << 30)) return ((n + (1L << 19)) >> 20) + " MB";
+        return String.format(java.util.Locale.US, "%.1f GB", n / (double) (1L << 30));
     }
 
     /** OTA listener that reports against the current otaCommandId, so a duplicate command
@@ -1383,6 +1408,10 @@ public class MdmService extends Service {
             @Override public void onDownloadProgress(String phase, int percent) {
                 updateNotificationIfNeeded("Updating your device… " + percent + "%");
                 sendOtaProgressFrame(otaCommandId, phase, percent);
+            }
+            @Override public void onDownloadProgress(String phase, int percent, long done, long total) {
+                updateNotificationIfNeeded(otaNotificationText(percent, done, total));
+                sendOtaProgressFrame(otaCommandId, phase, percent, done, total);
             }
             @Override public void onDownloadComplete() {
                 updateNotificationIfNeeded("Almost done — installing the update…");

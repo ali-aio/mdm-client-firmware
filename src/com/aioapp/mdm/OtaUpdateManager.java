@@ -54,6 +54,15 @@ public class OtaUpdateManager {
 
     public interface Listener {
         void onDownloadProgress(String phase, int percent);
+
+        /**
+         * Same report, with the byte counters behind it. A percent is too coarse to
+         * watch — one percent of a two-gigabyte image is twenty megabytes — so where the
+         * download knows the real figures it sends them too.
+         */
+        default void onDownloadProgress(String phase, int percent, long done, long total) {
+            onDownloadProgress(phase, percent);
+        }
         void onDownloadComplete();
         void onInstallComplete();
         void onError(String errorCode);
@@ -329,7 +338,7 @@ public class OtaUpdateManager {
                         if (step != lastStep || pct == 100 || due) {
                             lastReportedPercent = pct;
                             lastReportedAt = now;
-                            if (listener != null) listener.onDownloadProgress("downloading", pct);
+                            if (listener != null) listener.onDownloadProgress("downloading", pct, downloaded, totalSize);
                         }
                     }
                 },

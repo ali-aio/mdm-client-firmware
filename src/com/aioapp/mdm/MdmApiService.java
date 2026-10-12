@@ -281,12 +281,20 @@ public class MdmApiService {
      * device is actively downloading.
      */
     public void postOtaProgress(String serialNumber, String commandId, String phase, int percent) {
+        postOtaProgress(serialNumber, commandId, phase, percent, 0L, 0L);
+    }
+
+    /** With byte counters, where the download knows them: a percent alone moves once per
+     *  twenty megabytes on a two-gigabyte image, which reads as a stalled transfer. */
+    public void postOtaProgress(String serialNumber, String commandId, String phase, int percent, long done, long total) {
         try {
             JSONObject body = new JSONObject();
             body.put("serial_number", serialNumber);
             body.put("command_id", commandId);
             body.put("phase", phase);
             body.put("percent", percent);
+            if (done > 0) body.put("bytes", done);
+            if (total > 0) body.put("bytes_total", total);
             PostResult result = doPost("/api/v1/ota/progress", body.toString());
             Log.d(TAG, "OTA progress commandId=" + commandId + " phase=" + phase + " percent=" + percent + " response=" + result.code);
         } catch (Exception e) {
