@@ -33,6 +33,14 @@ public class OtaUpdateManager {
     private static final String TAG = "OtaUpdateManager";
 
     private static final int PROGRESS_REPORT_STEP = 1;
+    /**
+     * Re-send the current percent at least this often while a download is running, even
+     * when it has not advanced a whole percent. 1% of a multi-GB package is tens of
+     * megabytes; on a weak link that is longer than the server's stall window, so a live
+     * download was being failed for saying nothing. The server treats any report as
+     * proof of life (command_status.updated_at), so repeating the same number is enough.
+     */
+    private static final long PROGRESS_HEARTBEAT_MS = 120_000L;
     private static final String OTA_PACKAGE_DIR = "/data/ota_package";
     private static final String OTA_PACKAGE_PATH = OTA_PACKAGE_DIR + "/update.zip";
     private static final String TEMP_FILE_NAME = "update_temp.zip";
@@ -49,6 +57,13 @@ public class OtaUpdateManager {
         void onDownloadComplete();
         void onInstallComplete();
         void onError(String errorCode);
+
+        /**
+         * Same as {@link #onError}, but naming the attempt that ended. An attempt that is
+         * cancelled or superseded finishes after its successor has started, so reporting
+         * it against "the current command" blames the wrong one.
+         */
+        default void onErrorFor(String commandId, String errorCode) { onError(errorCode); }
     }
 
     private final Context context;
@@ -57,12 +72,15 @@ public class OtaUpdateManager {
     private Listener listener;
 
     private volatile int lastReportedPercent = -1;
+    private volatile long lastReportedAt = 0L;
     private volatile int lastReportedStatus = -1;
     private volatile int generation = 0;
     private volatile String currentPhase = "idle";
     private volatile int currentPercent = 0;
     private volatile boolean active = false;
     private volatile String currentUrl = null;
+    /** The command this attempt belongs to, so a late failure is reported against it. */
+    private volatile String attemptCommandId = null;
 
     private PowerManager.WakeLock wakeLock;
     private Handler wakeLockTimer;
@@ -115,6 +133,9 @@ public class OtaUpdateManager {
     // ----------------------------------------------------------------
 
     public void cancel() {
+        boolean wasRunning = active;
+        String cancelled = attemptCommandId;
+        attemptCommandId = null;
         generation++;
         active = false;
         currentPhase = "idle";
@@ -122,13 +143,18 @@ public class OtaUpdateManager {
         try { updateEngine.cancel(); } catch (Exception e) { Log.w(TAG, "cancel: " + e.getMessage()); }
         try { updateEngine.unbind(); } catch (Exception e) { Log.w(TAG, "unbind: " + e.getMessage()); }
         releaseWakeLock();
+        // A cancel that leaves the server believing a download is still running is how a
+        // row sits "downloading" until a sweep fails it. Tell it now.
+        if (wasRunning && listener != null) listener.onErrorFor(cancelled, "CANCELLED");
     }
 
     // ----------------------------------------------------------------
     // Start update — full ota-app flow
     // ----------------------------------------------------------------
 
-    public void startUpdate(String url) {
+    public void startUpdate(String url) { startUpdate(url, null); }
+
+    public void startUpdate(String url, String commandId) {
         Log.i(TAG, "startUpdate url=" + url);
         // The cached partial is only worth resuming if it came from this same URL.
         // A cancelled download of another package left bytes of a different zip in
@@ -153,6 +179,8 @@ public class OtaUpdateManager {
         cancel();
 
         final int myGen = ++generation;
+        final String myCommandId = commandId;
+        attemptCommandId = commandId;
         lastReportedPercent = -1;
         lastReportedStatus = -1;
         active = true;
@@ -211,6 +239,12 @@ public class OtaUpdateManager {
                     // scratch instead of resuming from the same bad bytes.
                     purgeCachedPayload();
                     if (listener != null) listener.onError("DOWNLOAD_ERROR");
+                } else {
+                    // Superseded by a newer attempt: still say the old one ended, or the
+                    // server is left watching a download that no longer exists and can
+                    // only time it out half an hour later.
+                    Log.w(TAG, "OTA error on superseded attempt " + myGen + ": " + e.getMessage());
+                    if (listener != null) listener.onErrorFor(myCommandId, "SUPERSEDED");
                 }
             } finally {
                 if (!handedOff) releaseWakeLock();
@@ -290,8 +324,11 @@ public class OtaUpdateManager {
                         currentPercent = pct;
                         int step = pct / PROGRESS_REPORT_STEP;
                         int lastStep = lastReportedPercent < 0 ? -1 : lastReportedPercent / PROGRESS_REPORT_STEP;
-                        if (step != lastStep || pct == 100) {
+                        long now = System.currentTimeMillis();
+                        boolean due = now - lastReportedAt >= PROGRESS_HEARTBEAT_MS;
+                        if (step != lastStep || pct == 100 || due) {
                             lastReportedPercent = pct;
+                            lastReportedAt = now;
                             if (listener != null) listener.onDownloadProgress("downloading", pct);
                         }
                     }

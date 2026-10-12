@@ -1393,6 +1393,18 @@ public class MdmService extends Service {
                 reportOtaStatus(otaCommandId, "installed", null);
                 otaCommandId = null;
             }
+            @Override public void onErrorFor(String commandId, String errorCode) {
+                // An attempt that ended after its successor started: report it against
+                // its own command, and leave the running one alone.
+                String id = (commandId == null || commandId.isEmpty()) ? otaCommandId : commandId;
+                Log.w(TAG, "OTA " + errorCode + " on command " + id);
+                reportOtaStatus(id, "error", errorCode);
+                if (id != null && id.equals(otaCommandId)) {
+                    updateNotificationIfNeeded("Couldn't finish the update — it can be retried from the dashboard");
+                    otaCommandId = null;
+                }
+            }
+
             @Override public void onError(String errorCode) {
                 // Keep the user-facing text reassuring; the raw code goes to the log + server.
                 // Failed updates wait for an operator's Retry on the dashboard; they
@@ -2109,7 +2121,7 @@ public class MdmService extends Service {
                 }
                 // New or different package: cancel anything stale and start fresh.
                 otaUpdateManager.cancel();
-                otaUpdateManager.startUpdate(updateUrl);
+                otaUpdateManager.startUpdate(updateUrl, otaCmdId);
                 break;
             }
             case "update_splash": {
