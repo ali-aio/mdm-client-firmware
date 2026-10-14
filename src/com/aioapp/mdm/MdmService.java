@@ -173,6 +173,12 @@ public class MdmService extends Service {
     private volatile boolean cmdStateLoaded = false;
 
     private static final int MAX_LOGCAT_STREAMS = 3;
+    /** Interactive shell sessions by session id (see runShellSession). */
+    private final java.util.Map<String, java.lang.Process> shellSessions = new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.Map<String, Long> shellLastInput = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final int MAX_SHELL_SESSIONS = 3;
+    /** A session nobody has typed into for this long is closed. */
+    private static final long SHELL_IDLE_MS = 30L * 60_000L;
     private android.os.PowerManager.WakeLock remoteWakeLock;  // keeps the screen on during a remote session
     private static final long REMOTE_WAKE_TIMEOUT_MS = 30 * 60 * 1000L;  // safety cap so a dropped session can't pin the screen
     private volatile MdmWebSocketClient wsClient;      // published from startWebSocket, read on many threads
@@ -1294,6 +1300,134 @@ public class MdmService extends Service {
         } catch (Exception ignored) {}
     }
 
+    /**
+     * One interactive shell for as long as the dashboard console stays open: a single
+     * `sh -i` whose stdin is fed by shell_input frames and whose output (stdout and
+     * stderr together) goes back as {type:shell_data, request_id, chunk} frames, ending
+     * with {type:shell_end}. State — the working directory, variables, a program waiting
+     * for input — carries from one line to the next, unlike the per-command `sh -c`.
+     * It runs with this app's privileges, the same as the shell command.
+     */
+    private void runShellSession(String sid) {
+        if (sid == null || sid.isEmpty() || shellSessions.containsKey(sid)) return;
+        if (shellSessions.size() >= MAX_SHELL_SESSIONS) {
+            sendShellEnd(sid, "error", "too many open shell sessions on this device");
+            return;
+        }
+        java.lang.Process p;
+        try {
+            ProcessBuilder pb = new ProcessBuilder("/system/bin/sh", "-i").redirectErrorStream(true);
+            pb.environment().put("TERM", "dumb");
+            pb.environment().put("PS1", "$ ");
+            pb.directory(new java.io.File("/"));
+            p = pb.start();
+        } catch (Exception e) {
+            sendShellEnd(sid, "error", "could not start a shell: " + e.getMessage());
+            return;
+        }
+        shellSessions.put(sid, p);
+        shellLastInput.put(sid, System.currentTimeMillis());
+        Log.i(TAG, "shell session " + sid + " opened");
+        final java.lang.Process proc = p;
+        // Watchdog: a read blocks until the shell prints, so idleness and a dropped
+        // socket are noticed here instead.
+        Thread dog = new Thread(() -> {
+            while (shellSessions.get(sid) == proc) {
+                try { Thread.sleep(30_000); } catch (InterruptedException ie) { return; }
+                Long last = shellLastInput.get(sid);
+                boolean idle = last != null && System.currentTimeMillis() - last > SHELL_IDLE_MS;
+                boolean gone = wsClient == null || !wsClient.isConnected();
+                if (idle || gone) {
+                    if (idle) sendShellChunk(sid, "\n[closed after 30 minutes without input]\n");
+                    closeShellSession(sid);
+                    return;
+                }
+            }
+        }, "shell-dog-" + sid);
+        dog.setDaemon(true);
+        dog.start();
+        String reason = "exited";
+        try (java.io.InputStreamReader rd = new java.io.InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8)) {
+            char[] buf = new char[8192];
+            StringBuilder sb = new StringBuilder();
+            long lastFlush = System.currentTimeMillis();
+            int n;
+            while ((n = rd.read(buf)) != -1) {
+                sb.append(buf, 0, n);
+                long now = System.currentTimeMillis();
+                // Flush small bursts quickly (a prompt, an echo) but batch a flood.
+                if (sb.length() >= 12000 || now - lastFlush >= 60 || !rd.ready()) {
+                    sendShellChunk(sid, sb.toString());
+                    sb.setLength(0);
+                    lastFlush = now;
+                }
+            }
+            if (sb.length() > 0) sendShellChunk(sid, sb.toString());
+        } catch (Exception e) {
+            reason = shellSessions.containsKey(sid) ? "error" : "closed";
+        } finally {
+            boolean wasOpen = shellSessions.remove(sid) != null;
+            shellLastInput.remove(sid);
+            try { p.destroyForcibly(); } catch (Exception ignored) {}
+            int code = -1;
+            try { code = p.exitValue(); } catch (Exception ignored) {}
+            if (!wasOpen) reason = "closed";
+            sendShellEnd(sid, reason, "exited".equals(reason) ? "exit " + code : "");
+            Log.i(TAG, "shell session " + sid + " ended (" + reason + ")");
+        }
+    }
+
+    private void writeShellInput(String sid, String data) {
+        java.lang.Process p = shellSessions.get(sid);
+        if (p == null || data == null) return;
+        shellLastInput.put(sid, System.currentTimeMillis());
+        try {
+            java.io.OutputStream os = p.getOutputStream();
+            os.write(data.getBytes(StandardCharsets.UTF_8));
+            os.flush();
+        } catch (Exception e) {
+            sendShellChunk(sid, "\n[input failed: " + e.getMessage() + "]\n");
+        }
+    }
+
+    private void closeShellSession(String sid) {
+        java.lang.Process p = shellSessions.remove(sid);
+        shellLastInput.remove(sid);
+        if (p != null) {
+            try { p.destroyForcibly(); } catch (Exception ignored) {}
+        }
+    }
+
+    private void sendShellChunk(String sid, String chunk) {
+        if (wsClient == null || !wsClient.isConnected() || chunk == null || chunk.isEmpty()) return;
+        try {
+            JSONObject m = new JSONObject();
+            m.put("type", "shell_data");
+            m.put("request_id", sid);
+            m.put("chunk", chunk);
+            wsClient.send(m.toString());
+        } catch (Exception e) {
+            Log.e(TAG, "shell chunk send failed: " + e.getMessage());
+        }
+    }
+
+    private void sendShellEnd(String sid, String reason, String error) {
+        if (wsClient == null || !wsClient.isConnected()) return;
+        try {
+            JSONObject m = new JSONObject();
+            m.put("type", "shell_end");
+            m.put("request_id", sid);
+            m.put("reason", reason);
+            if (error != null && !error.isEmpty()) m.put("error", error);
+            wsClient.send(m.toString());
+        } catch (Exception ignored) {}
+    }
+
+    /** Closes every shell session — called when the service stops. */
+    private void stopAllShellSessions() {
+        for (String sid : new java.util.ArrayList<>(shellSessions.keySet())) closeShellSession(sid);
+    }
+
     /** Kills every active logcat stream — called when the device WS drops or the service stops. */
     private void stopAllLogcatStreams() {
         for (java.util.Map.Entry<String, java.lang.Process> e : logcatStreams.entrySet()) {
@@ -1837,6 +1971,29 @@ public class MdmService extends Service {
                 });
                 break;
             }
+            case "shell_open": {
+                final String shSid = msg.optString("session_id", "");
+                // Its own thread: a session lives as long as the console is open, and must
+                // not hold one of heavyExecutor's core threads away from installs and logcat.
+                Thread shT = new Thread(() -> {
+                    try { runShellSession(shSid); } catch (Exception e) {
+                        Log.e(TAG, "shell session error: " + e.getMessage());
+                        sendShellEnd(shSid, "error", e.getMessage());
+                    }
+                }, "shell-" + shSid);
+                shT.setDaemon(true);
+                shT.start();
+                break;
+            }
+            case "shell_input": {
+                final String inSid = msg.optString("session_id", "");
+                final String inData = msg.optString("data", "");
+                executor.submit(() -> writeShellInput(inSid, inData));
+                break;
+            }
+            case "shell_close":
+                closeShellSession(msg.optString("session_id", ""));
+                break;
             case "stop_logcat_stream": {
                 java.lang.Process lp = logcatStreams.remove(msg.optString("request_id", ""));
                 if (lp != null) lp.destroyForcibly();
@@ -3079,6 +3236,8 @@ public class MdmService extends Service {
         // to decide whether to use the response as a command channel for a device with no
         // socket — the gate follows what the device can do, not a server-wide flag.
         extra.put("http_commands", true);
+        // This client runs interactive shell sessions (shell_open / shell_input / shell_close).
+        extra.put("shell_session", true);
         // The Android IDs the Nugget apps see, which only the OS knows (see getNuggetAndroidIds).
         JSONArray nuggetIds = getNuggetAndroidIds();
         if (nuggetIds.length() > 0) extra.put("app_android_ids", nuggetIds);
@@ -4232,6 +4391,7 @@ public class MdmService extends Service {
         running = false;
         isCapturing = false;
         stopAllLogcatStreams();
+        stopAllShellSessions();
         releaseRemoteWakeLock();
         alarmManager.cancel(pollIntent);
         if (pollReceiver != null) {
