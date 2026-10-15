@@ -1112,6 +1112,23 @@ public class MdmService extends Service {
     /** Terminal command result. Persisted and retried over HTTP until the server confirms,
      *  so a 'completed'/'failed' is never lost to a half-open socket or a process restart.
      *  Replaces the old fire-and-forget WS/HTTP terminal acks. */
+    /**
+     * Erase the device the way Settings → Reset does: the FACTORY_RESET broadcast to the
+     * framework's MasterClearReceiver, which needs MASTER_CLEAR (the system uid passes every
+     * permission check). The force extra gets past DISALLOW_FACTORY_RESET, which a lock policy
+     * may have set to keep a guest from resetting the tablet — it is not meant to stop us.
+     * External storage is kept: on our hardware it is the SD card, not user data.
+     */
+    private void factoryReset(String reason) {
+        Log.w(TAG, "Factory reset: " + reason);
+        Intent i = new Intent(Intent.ACTION_FACTORY_RESET);
+        i.setPackage("android");
+        i.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
+        i.putExtra(Intent.EXTRA_REASON, reason);
+        i.putExtra("android.intent.extra.FORCE_FACTORY_RESET", true);
+        sendBroadcast(i);
+    }
+
     private void reportTerminal(String cmdId, String serial, String status, String output) {
         reportTerminal(cmdId, serial, status, output, null);
     }
@@ -2279,6 +2296,21 @@ public class MdmService extends Service {
                 pm.reboot(null);
                 break;
             }
+            case "wipe": {
+                // Factory reset. Ack first: nothing survives the wipe to report afterwards, and
+                // the server takes "completed" as its cue to forget this device's own key so the
+                // wiped device can register a fresh one. The wipe follows a few seconds later
+                // whether or not the ack got through.
+                reportTerminal(cmdId, serialNumber, "completed", "factory reset starting");
+                final String wipeReason = "MDM wipe (command " + cmdId + ")";
+                Thread t = new Thread(() -> {
+                    try { Thread.sleep(5_000); } catch (InterruptedException ignored) { }
+                    factoryReset(wipeReason);
+                }, "mdm-wipe");
+                t.setDaemon(true);
+                t.start();
+                break;
+            }
             case "ota": {
                 final String updateUrl = payload.optString("update_url", "");
                 final String otaCmdId = cmdId;
@@ -3238,6 +3270,9 @@ public class MdmService extends Service {
         extra.put("http_commands", true);
         // This client runs interactive shell sessions (shell_open / shell_input / shell_close).
         extra.put("shell_session", true);
+        // This client runs the "wipe" command (factory reset). A flag, not extra.capabilities:
+        // a capabilities list from this client would replace the server's firmware defaults.
+        extra.put("factory_reset", true);
         // The Android IDs the Nugget apps see, which only the OS knows (see getNuggetAndroidIds).
         JSONArray nuggetIds = getNuggetAndroidIds();
         if (nuggetIds.length() > 0) extra.put("app_android_ids", nuggetIds);
