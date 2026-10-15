@@ -363,6 +363,16 @@ public class MdmApiService {
         }
     }
 
+    /** POST /api/v1/battery-log: raw battery rows (BatteryLog). Returns the HTTP status, -1 on a network error. */
+    int postBatteryLog(JSONObject body) {
+        try {
+            return doPost("/api/v1/battery-log", body.toString()).code;
+        } catch (Exception e) {
+            Log.w(TAG, "battery log upload failed: " + e.getMessage());
+            return -1;
+        }
+    }
+
     private static class PostResult {
         final int code;
         final String body;

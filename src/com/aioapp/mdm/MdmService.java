@@ -229,6 +229,17 @@ public class MdmService extends Service {
         }
     };
 
+    // Battery wear (1.10.1): times the constant-current climb across a voltage ladder while
+    // charging (see BatteryWear) and reports the last finished climb as battery_cc, and keeps
+    // the raw battery curve on the device (see BatteryLog) for designing the health model.
+    // Both null on products without a battery and a charger. The last climb is kept across
+    // restarts so a keyframe after a reboot still carries it.
+    private BatteryWear batteryWear;
+    private BatteryLog batteryLog;
+    private volatile String lastClimbJson;
+    private static final String PREFS_BATTERY_WEAR = "mdm_battery_wear";
+    private static final String KEY_LAST_CLIMB = "last_climb";
+
     // Wi-Fi disconnect tracking: edge-detect connected→disconnected and keep the last
     // hour of event timestamps (elapsedRealtime millis) so getWifiDisconnects1h() is O(n).
     private BroadcastReceiver wifiReceiver;
@@ -441,11 +452,31 @@ public class MdmService extends Service {
                 + " charging=" + product.hasCharging()
                 + " wlc=" + product.hasWlc());
 
+        if (product.hasBattery() && product.hasCharging()) {
+            batteryWear = new BatteryWear(SystemClock.elapsedRealtime(), isScreenOn());
+            batteryLog = new BatteryLog(new File(getFilesDir(), "battery"));
+            lastClimbJson = getSharedPreferences(PREFS_BATTERY_WEAR, MODE_PRIVATE)
+                    .getString(KEY_LAST_CLIMB, null);
+        }
         batteryReceiver = new BroadcastReceiver() {
             @Override public void onReceive(Context context, Intent intent) {
                 cachedBatteryIntent = intent;
                 int charging = extractCharging(intent) ? 1 : 0;
                 String chargerType = extractChargerType(intent);
+                if (batteryWear != null) {
+                    int ichgUa = readChargeCurrentUa(intent);
+                    logBattery("b", intent, ichgUa);
+                    // On a healthy socket HTTP check-ins are rare, so the broadcast is what
+                    // keeps the upload going; flushBatteryLog paces itself.
+                    flushBatteryLog();
+                    // A climb that ends here on a charging edge rides the edge's push below;
+                    // one that ends without an edge (top rung reached, or a charge stop while
+                    // still plugged in) pushes on its own.
+                    if (feedBatteryWear(intent, ichgUa)
+                            && (lastChargingState == -1 || charging == lastChargingState)) {
+                        sendTelemetryOverWs();
+                    }
+                }
                 if (lastChargingState != -1 && charging != lastChargingState) {
                     boolean started = chargerFlap.onFlip(SystemClock.elapsedRealtime(),
                             lastChargingState == 1, lastChargerType);
@@ -508,6 +539,12 @@ public class MdmService extends Service {
         screenOnReceiver = new BroadcastReceiver() {
             @Override public void onReceive(Context context, Intent intent) {
                 recordPowerPress();
+                BatteryWear wear = batteryWear;
+                if (wear != null) {
+                    wear.onScreen(SystemClock.elapsedRealtime(),
+                            Intent.ACTION_SCREEN_ON.equals(intent.getAction()));
+                    logBattery("s", getBatteryIntent(), Integer.MIN_VALUE);
+                }
             }
         };
         IntentFilter powerFilter = new IntentFilter();
@@ -854,6 +891,7 @@ public class MdmService extends Service {
                         maybeRegisterDeviceKey();
                         serverReachable = true;
                         flushOfflineQueue();
+                        flushBatteryLog();
                     } else {
                         serverReachable = false;
                         maybeQueueOffline();
@@ -1851,6 +1889,56 @@ public class MdmService extends Service {
         });
     }
 
+    // Battery log upload: at most one attempt per BATTERY_UPLOAD_EVERY_MS, and a server that
+    // does not have the endpoint yet (404/405/501) is asked again only after
+    // BATTERY_UPLOAD_MISSING_MS. Rows stay on the device meanwhile (BatteryLog keeps 21 days).
+    private static final long BATTERY_UPLOAD_EVERY_MS = 15 * 60_000L;
+    private static final long BATTERY_UPLOAD_MISSING_MS = 6 * 3_600_000L;
+    private static final int BATTERY_UPLOAD_ROWS = 2000;
+    private final java.util.concurrent.atomic.AtomicBoolean uploadingBatteryLog =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    private volatile long batteryUploadNotBefore = 0;   // elapsedRealtime
+
+    /** Send the battery rows not yet accepted, oldest first (see BatteryLog). */
+    private void flushBatteryLog() {
+        BatteryLog log = batteryLog;
+        if (log == null || SystemClock.elapsedRealtime() < batteryUploadNotBefore
+                || !uploadingBatteryLog.compareAndSet(false, true)) return;
+        executor.submit(() -> {
+            long wait = BATTERY_UPLOAD_EVERY_MS;
+            try {
+                BatteryLog.Batch batch;
+                while ((batch = log.peek(BATTERY_UPLOAD_ROWS)) != null) {
+                    JSONObject body = new JSONObject();
+                    body.put("serial", getDeviceSerial());
+                    body.put("schema", BatteryLog.SCHEMA);
+                    body.put("columns", BatteryLog.HEADER);
+                    body.put("now_ms", System.currentTimeMillis());
+                    body.put("now_elapsed_ms", SystemClock.elapsedRealtime());
+                    body.put("boot_id", getBootId());
+                    body.put("rows", batch.rows);
+                    int code = apiService.postBatteryLog(body);
+                    if (code == 404 || code == 405 || code == 501) {
+                        wait = BATTERY_UPLOAD_MISSING_MS;
+                        break;
+                    }
+                    if (code != 200 && code != 204) {
+                        Log.w(TAG, "battery log not sent (" + code + ")");
+                        break;
+                    }
+                    log.ack(batch);
+                    Log.i(TAG, "sent " + batch.count + " battery row(s)");
+                    if (batch.count < BATTERY_UPLOAD_ROWS) break;
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "sending battery log failed: " + e.getMessage());
+            } finally {
+                batteryUploadNotBefore = SystemClock.elapsedRealtime() + wait;
+                uploadingBatteryLog.set(false);
+            }
+        });
+    }
+
     /** The key in use changed: reconnect the socket with it. */
     private synchronized void restartWebSocket() {
         if (wsClient != null) {
@@ -1866,7 +1954,7 @@ public class MdmService extends Service {
         wsClient = new MdmWebSocketClient(apiService.getApiBaseUrl(), serial, apiService.getApiKey());
         wsClient.setListener(this::handleWsMessage);
         // On every (re)connect the server has no baseline for us — send a full keyframe.
-        wsClient.setConnectedCallback(() -> { forceKeyframe = true; sendTelemetryOverWs(); drainPendingAcks(); serverReachable = true; flushOfflineQueue(); });
+        wsClient.setConnectedCallback(() -> { forceKeyframe = true; sendTelemetryOverWs(); drainPendingAcks(); serverReachable = true; flushOfflineQueue(); flushBatteryLog(); });
         wsClient.start();
         Log.i(TAG, "WebSocket client started");
     }
@@ -3360,6 +3448,13 @@ public class MdmService extends Service {
             extra.put("battery_present",
                     batteryIntent.getBooleanExtra(BatteryManager.EXTRA_PRESENT, true));
         }
+        // The last finished constant-current climb (BatteryWear) — the wear signal. It
+        // changes at most once per charge, so it is gated rather than volatile.
+        String climb = lastClimbJson;
+        if (climb != null) {
+            try { extra.put("battery_cc", new JSONObject(climb)); }
+            catch (JSONException ignored) { }
+        }
         // Screen on/off. The service already reads this to pace its polling; reporting it
         // lets the server separate "powered and in use" from "powered and idle", which is
         // the difference between a device working a shift and one sitting on a shelf.
@@ -3527,7 +3622,9 @@ public class MdmService extends Service {
             // flight is recovered server-side from latest_extra — processOfflineExit.)
             "kiosk_suspended", "offline_exit_at",
             // A flap starting or settling is one frame; the toggles inside it are none.
-            "charger_flapping"
+            "charger_flapping",
+            // A new charge climb (BatteryWear), at most one per charge.
+            "battery_cc"
     };
     private static final String[] VOLATILE_EXTRA_KEYS = {
             "battery_temp_c", "ram_usage_mb", "uptime_seconds", "wifi_rssi", "ota_progress",
@@ -3771,6 +3868,115 @@ public class MdmService extends Service {
         if ((plugged & BatteryManager.BATTERY_PLUGGED_USB) != 0) return "usb";
         if ((plugged & BatteryManager.BATTERY_PLUGGED_WIRELESS) != 0) return "wireless";
         return "unknown";
+    }
+
+    /** Raw CHARGING status — FULL and NOT_CHARGING (thermal suspend) are not, though plugged in. */
+    private static boolean isChargingStatus(Intent intent) {
+        return intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0
+                && intent.getIntExtra(BatteryManager.EXTRA_STATUS, BatteryManager.BATTERY_STATUS_UNKNOWN)
+                        == BatteryManager.BATTERY_STATUS_CHARGING;
+    }
+
+    /**
+     * healthd's current_now, which on the T7 is the charger's programmed charge current
+     * (ICHG), not a measurement. A binder call into healthd (an I2C read of the charger), so
+     * it is made only while charging; MIN_VALUE otherwise.
+     */
+    private int readChargeCurrentUa(Intent intent) {
+        if (intent == null || !isChargingStatus(intent)) return Integer.MIN_VALUE;
+        BatteryManager bm = getSystemService(BatteryManager.class);
+        return bm != null ? bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW)
+                : Integer.MIN_VALUE;
+    }
+
+    /**
+     * One BatteryLog row from a battery broadcast (ev b) or a screen edge (ev s, with the
+     * cached broadcast). wlc is the pad's guest line as last read, wlc_on the pad's saved
+     * charging switch, so the analysis can tell whether a guest on the pad moves the drain.
+     */
+    private void logBattery(String ev, Intent intent, int ichgUa) {
+        BatteryLog log = batteryLog;
+        if (log == null || intent == null) return;
+        int status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, BatteryManager.BATTERY_STATUS_UNKNOWN);
+        int plugged = intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0);
+        int screen = isScreenOn() ? 1 : 0;
+        int wlc = -1, wlcOn = -1;
+        if (product.hasWlc()) {
+            synchronized (wlcLock) { wlc = cachedWlcStatus; }
+            wlcOn = getSharedPreferences(PREFS_WLC, MODE_PRIVATE)
+                    .getBoolean(KEY_WLC_CHARGING, true) ? 1 : 0;
+        }
+        int ichgMa = ichgUa == Integer.MIN_VALUE || ichgUa == 0 ? -1 : Math.abs(ichgUa) / 1000;
+        int iin = intent.getIntExtra("max_charging_current", -1);
+        log.log(System.currentTimeMillis(), SystemClock.elapsedRealtime(), ev,
+                status + "/" + plugged + "/" + screen + "/" + wlc + "/" + wlcOn,
+                intent.getIntExtra(BatteryManager.EXTRA_VOLTAGE, -1),
+                extractBatteryPct(intent),
+                status, plugged,
+                intent.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, -1000) / 10.0,
+                screen, ichgMa, iin > 0 ? iin / 1000 : -1,
+                chargerFlap.isFlapping() ? 1 : 0, wlc, wlcOn);
+    }
+
+    /**
+     * Feeds one battery broadcast to BatteryWear; true when it finished a climb, which is
+     * then stored as battery_cc.
+     */
+    private boolean feedBatteryWear(Intent intent, int ichgUa) {
+        BatteryWear wear = batteryWear;
+        if (wear == null || intent == null) return false;
+        int plugged = intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0);
+        boolean charging = isChargingStatus(intent);
+        BatteryWear.Climb climb = wear.onSample(SystemClock.elapsedRealtime(), charging,
+                plugged != 0, chargerFlap.isFlapping(),
+                intent.getIntExtra(BatteryManager.EXTRA_VOLTAGE, -1),
+                intent.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, -1000) / 10.0,
+                ichgUa, intent.getIntExtra("max_charging_current", -1),
+                extractChargerType(intent));
+        if (climb == null) return false;
+        try {
+            String json = climbToJson(climb).toString();
+            lastClimbJson = json;
+            getSharedPreferences(PREFS_BATTERY_WEAR, MODE_PRIVATE).edit()
+                    .putString(KEY_LAST_CLIMB, json).apply();
+            Log.i(TAG, "Battery climb: " + json);
+            return true;
+        } catch (JSONException e) {
+            Log.w(TAG, "Battery climb not stored", e);
+            return false;
+        }
+    }
+
+    /**
+     * battery_cc: at (device wall clock, ms), mv0 + step (rung voltages), s (seconds from
+     * the first rung to each rung crossed), scr (cumulative screen-on seconds at each rung),
+     * end (top | unplug | stop), ichg_ma [min, max] (programmed charge current; -1 unknown),
+     * iin_ma (input limit, -1 unknown), plug, temp_c [min, max], gap_s (widest sample gap
+     * bracketing a crossing), n (samples).
+     */
+    private static JSONObject climbToJson(BatteryWear.Climb c) throws JSONException {
+        JSONArray s = new JSONArray();
+        JSONArray scr = new JSONArray();
+        for (int i = 0; i < c.sec.length; i++) {
+            s.put(c.sec[i]);
+            scr.put(c.screenSec[i]);
+        }
+        JSONObject o = new JSONObject();
+        o.put("at", System.currentTimeMillis());
+        o.put("mv0", c.firstRungMv);
+        o.put("step", BatteryWear.RUNG_STEP_MV);
+        o.put("s", s);
+        o.put("scr", scr);
+        o.put("end", c.end);
+        o.put("ichg_ma", new JSONArray().put(c.ichgMinMa).put(c.ichgMaxMa));
+        o.put("iin_ma", c.inputLimitMa);
+        o.put("plug", c.plug != null ? c.plug : "unknown");
+        if (!Double.isNaN(c.tempMinC)) {
+            o.put("temp_c", new JSONArray().put(c.tempMinC).put(c.tempMaxC));
+        }
+        o.put("gap_s", c.maxGapSec);
+        o.put("n", c.samples);
+        return o;
     }
 
     /** Record a Wi-Fi disconnect and prune events older than an hour. */
@@ -4435,6 +4641,7 @@ public class MdmService extends Service {
         }
         flapHandler.removeCallbacks(flapSettleCheck);
         tempFastHandler.removeCallbacks(tempFastTick);
+        if (batteryLog != null) batteryLog.shutdown();
         executor.shutdownNow();
         if (heavyExecutor != null) heavyExecutor.shutdownNow();
         if (wlcWatcher != null) wlcWatcher.shutdownNow();
