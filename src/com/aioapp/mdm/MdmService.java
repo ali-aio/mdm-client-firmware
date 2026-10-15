@@ -1892,8 +1892,12 @@ public class MdmService extends Service {
     // Battery log upload: at most one attempt per BATTERY_UPLOAD_EVERY_MS, and a server that
     // does not have the endpoint yet (404/405/501) is asked again only after
     // BATTERY_UPLOAD_MISSING_MS. Rows stay on the device meanwhile (BatteryLog keeps 21 days).
+    // No answer at all (-1) is retried after BATTERY_UPLOAD_NO_NET_MS (1.10.2): the first
+    // attempt runs on the boot-time battery broadcast, before Wi-Fi has DNS, and used to
+    // wait the full 15 minutes for nothing.
     private static final long BATTERY_UPLOAD_EVERY_MS = 15 * 60_000L;
     private static final long BATTERY_UPLOAD_MISSING_MS = 6 * 3_600_000L;
+    private static final long BATTERY_UPLOAD_NO_NET_MS = 60_000L;
     private static final int BATTERY_UPLOAD_ROWS = 2000;
     private final java.util.concurrent.atomic.AtomicBoolean uploadingBatteryLog =
             new java.util.concurrent.atomic.AtomicBoolean(false);
@@ -1919,11 +1923,14 @@ public class MdmService extends Service {
                     body.put("rows", batch.rows);
                     int code = apiService.postBatteryLog(body);
                     if (code == 404 || code == 405 || code == 501) {
+                        Log.w(TAG, "battery log not taken (" + code + "); kept, next try in "
+                                + (BATTERY_UPLOAD_MISSING_MS / 3_600_000L) + " h");
                         wait = BATTERY_UPLOAD_MISSING_MS;
                         break;
                     }
                     if (code != 200 && code != 204) {
                         Log.w(TAG, "battery log not sent (" + code + ")");
+                        if (code == -1) wait = BATTERY_UPLOAD_NO_NET_MS;
                         break;
                     }
                     log.ack(batch);
