@@ -1691,6 +1691,11 @@ public class MdmService extends Service {
             }
         }
         applyTempFast(config.optInt("temp_fast_sec", 0));
+        // Which app to report on (HostApp). Only the check-in/telemetry answer carries it, so a
+        // config without the key (a dashboard push) leaves the stored pattern alone.
+        if (config.has("host_app_pattern")) {
+            HostApp.savePattern(MdmService.this, config.optString("host_app_pattern", ""));
+        }
         // Guest info for the home and lock screens (HTTP check-ins carry it; over the socket
         // it comes as its own "guest" frame). A config without it leaves what we have.
         try {
@@ -3476,6 +3481,9 @@ public class MdmService extends Service {
                 SystemPropertiesProxy.get("ro.boot.bootreason", "")));
         extra.put("boot_id", getBootId());
         extra.put("crash_events", getRecentCrashEvents());
+        // The app this device is there to run, read from outside it (HostApp).
+        JSONObject hostApp = HostApp.snapshot(MdmService.this);
+        if (hostApp != null) extra.put("host_app", hostApp);
         // Security posture (adb, developer options, unknown sources, root, accessibility
         // services, Play Protect): the compliance rules' shared vocabulary across agents.
         expireAdbTcp();
@@ -3631,7 +3639,10 @@ public class MdmService extends Service {
             // A flap starting or settling is one frame; the toggles inside it are none.
             "charger_flapping",
             // A new charge climb (BatteryWear), at most one per charge.
-            "battery_cc"
+            "battery_cc",
+            // The host app (HostApp): coarse and cached a minute, so it changes when the app
+            // comes to the front, dies, or is updated, and with its usage minute by minute.
+            "host_app"
     };
     private static final String[] VOLATILE_EXTRA_KEYS = {
             "battery_temp_c", "ram_usage_mb", "uptime_seconds", "wifi_rssi", "ota_progress",
@@ -3655,7 +3666,9 @@ public class MdmService extends Service {
         }
         synchronized (baselineLock) {
             for (String k : GATED_EXTRA_KEYS) {
-                if (!sameAsBaseline(k, curExtra)) extra.put(k, curExtra.get(k));
+                // A key that is gone (host_app once the server names no host app) goes as
+                // null, so the server's merged latest_extra drops it rather than keeping it.
+                if (!sameAsBaseline(k, curExtra)) extra.put(k, curExtra.has(k) ? curExtra.get(k) : JSONObject.NULL);
             }
             // Battery only for products that have one (matches the keyframe path).
             if (product.hasBattery() && lastSentBattery != curBattery) payload.put("battery_pct", curBattery);
