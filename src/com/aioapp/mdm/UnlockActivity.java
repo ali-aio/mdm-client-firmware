@@ -24,7 +24,8 @@ import android.widget.Toast;
 
 /**
  * The offline kiosk-exit prompt: a technician enters the static exit PIN (or the rotating
- * TOTP code) to leave kiosk lock mode with no server connection. Opened by five Power
+ * TOTP code) to leave kiosk lock mode with no server connection — or, in lost mode, the
+ * rotating code only, to lift lost mode (see LostMode). Opened by five Power
  * presses inside 10s — see MdmService.recordPowerPress, which is the exit path on QCOM
  * images, where the SystemUI long-press-Back arm does not exist. Deliberately unbranded.
  *
@@ -58,6 +59,8 @@ public class UnlockActivity extends Activity {
     private TextView status;
     private TextView unlockBtn;
     private Runnable lockoutTick;
+    /** Lost mode is on: only the rotating code is accepted, and it lifts lost mode. */
+    private boolean lost;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -69,7 +72,8 @@ public class UnlockActivity extends Activity {
         getWindow().setDimAmount(0.55f);
         getWindow().setBackgroundDrawableResource(android.R.color.transparent);
 
-        if (!KioskExit.isEnabled(this)) {
+        lost = LostMode.isOn(this);
+        if (lost ? !KioskExit.seedSet(this) : !KioskExit.isEnabled(this)) {
             Log.w(TAG, "offline exit not enabled/provisioned; dismissing");
             finish();
             return;
@@ -108,8 +112,10 @@ public class UnlockActivity extends Activity {
         mark.setLayoutParams(markLp);
         card.addView(mark);
 
-        card.addView(label("Exit kiosk mode", C_TITLE, 20, Typeface.DEFAULT_BOLD, dp(12), 0));
-        card.addView(label("Enter the exit PIN to unlock this device.",
+        card.addView(label(lost ? "Unlock lost device" : "Exit kiosk mode",
+                C_TITLE, 20, Typeface.DEFAULT_BOLD, dp(12), 0));
+        card.addView(label(lost ? "Enter the unlock code shown on the device page."
+                        : "Enter the exit PIN to unlock this device.",
                 C_SUB, 13, Typeface.DEFAULT, dp(4), dp(16)));
 
         // Entry display: one dot per digit, so the code is never on screen to be read off.
@@ -266,13 +272,33 @@ public class UnlockActivity extends Activity {
         }
         String code = entry.toString();
         entry.setLength(0);
-        if (!KioskExit.verify(this, code)) {
+        if (!(lost ? KioskExit.verifyRotating(this, code) : KioskExit.verify(this, code))) {
             updateEntry();
             if (KioskExit.isLockedOut(this)) {
                 refreshLockout();
             } else {
-                status.setText("Incorrect PIN. Try again.");
+                status.setText(lost ? "Incorrect code. Try again." : "Incorrect PIN. Try again.");
             }
+            return;
+        }
+        if (lost) {
+            // Lift lost mode only — the device goes back to the lock it should have, so a
+            // kiosk device is locked to its app again rather than left open.
+            try {
+                DevicePolicyManager dpm = (DevicePolicyManager) getSystemService(Context.DEVICE_POLICY_SERVICE);
+                LostMode.lift(this, dpm, new ComponentName(this, MdmAdminReceiver.class));
+            } catch (Exception e) {
+                Log.e(TAG, "lost mode lift error: " + e.getMessage());
+            }
+            try {
+                Intent report = new Intent(this, MdmService.class);
+                report.setAction(MdmService.ACTION_LOST_LIFTED);
+                startService(report);
+            } catch (Exception e) {
+                Log.e(TAG, "lift report error: " + e.getMessage());
+            }
+            Toast.makeText(this, "Lost mode lifted", Toast.LENGTH_LONG).show();
+            finish();
             return;
         }
         try {

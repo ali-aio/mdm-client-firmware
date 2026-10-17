@@ -8,6 +8,7 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.READ_PRIVILEGED_PHONE_STATE" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
@@ -114,6 +115,22 @@
             android:launchMode="singleTop"
             android:taskAffinity="com.aioapp.mdm.guest"
             android:theme="@style/GuestDialogTheme" />
+
+        <!-- Lost-mode screen (LostMode). Started only by the client, into lock task with the
+             client as the only allowlisted package. directBootAware: lost mode goes back up
+             from LOCKED_BOOT_COMPLETED. -->
+        <activity
+            android:name=".LostActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:directBootAware="true"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.aioapp.mdm.lost"
+            android:screenOrientation="unspecified"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard|navigation"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen" />
 
         <!-- Offline kiosk-exit prompt (TOTP). Unused — the nav-bar gesture exits directly via
              MdmService's Settings.Secure-key ContentObserver, no code entry. Kept in the tree,

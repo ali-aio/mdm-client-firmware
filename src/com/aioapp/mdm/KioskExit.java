@@ -123,6 +123,31 @@ public final class KioskExit {
         return false;
     }
 
+    /**
+     * Verify the rotating code only — the static exit PIN is deliberately not accepted. Lost
+     * mode uses this: the PIN is compiled into every client and known to every technician,
+     * so it cannot be what releases a device someone has walked off with; the rotating code
+     * comes from the device page, i.e. from someone signed in to the dashboard. Shares the
+     * failure count and lockout with {@link #verify}.
+     */
+    public static boolean verifyRotating(Context ctx, String code) {
+        if (isLockedOut(ctx)) return false;
+        boolean ok = seedSet(ctx) && Totp.verify(seed(ctx), code, System.currentTimeMillis() / 1000L,
+                digits(ctx), period(ctx));
+        SharedPreferences p = prefs(ctx);
+        if (ok) {
+            p.edit().putInt(K_FAILS, 0).putLong(K_LOCKOUT, 0).apply();
+            return true;
+        }
+        int fails = p.getInt(K_FAILS, 0) + 1;
+        SharedPreferences.Editor e = p.edit().putInt(K_FAILS, fails);
+        if (fails >= MAX_FAILS) {
+            e.putInt(K_FAILS, 0).putLong(K_LOCKOUT, System.currentTimeMillis() + LOCKOUT_MS);
+        }
+        e.apply();
+        return false;
+    }
+
     /** Record that the device was exited from kiosk offline (queues a check-in event). */
     public static void markExited(Context ctx) {
         setSuspended(ctx, true);

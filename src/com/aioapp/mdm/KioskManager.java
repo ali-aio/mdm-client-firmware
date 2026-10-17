@@ -42,6 +42,12 @@ public class KioskManager {
             Log.i(TAG, "Factory test boot (ffbm-02) — not applying kiosk config");
             return;
         }
+        // Lost mode outranks lock: while it is on, keep the lost screen up and leave the
+        // kiosk app alone. LostMode.lift re-applies this config once it is off.
+        if (LostMode.isOn(ctx)) {
+            LostMode.enforce(ctx, dpm, admin);
+            return;
+        }
         try {
             boolean enabled = config.optBoolean("kiosk_enabled", false);
             String pkg = config.optString("kiosk_package", "");
@@ -233,7 +239,7 @@ public class KioskManager {
 
     /** Send the device to the launcher (used when leaving kiosk, so it isn't stranded on
      *  the now-unlocked kiosk app). */
-    private static void goHome(Context ctx) {
+    static void goHome(Context ctx) {
         try {
             Intent home = new Intent(Intent.ACTION_MAIN);
             home.addCategory(Intent.CATEGORY_HOME);
@@ -244,7 +250,7 @@ public class KioskManager {
         }
     }
 
-    private static void stopSystemLockTask() {
+    static void stopSystemLockTask() {
         try {
             ActivityTaskManager.getService().stopSystemLockTaskMode();
         } catch (Exception e) {
@@ -264,7 +270,7 @@ public class KioskManager {
 
     /** Clear the allowlist if we still hold the admin that wrote it. A released admin cannot be
      *  used, and on a device we no longer hold there is nothing to clear. */
-    private static void clearLockTaskAllowlist(DevicePolicyManager dpm, ComponentName admin) {
+    static void clearLockTaskAllowlist(DevicePolicyManager dpm, ComponentName admin) {
         if (!isAdminActive(dpm, admin)) return;
         try {
             dpm.setLockTaskPackages(admin, new String[]{});
@@ -275,15 +281,15 @@ public class KioskManager {
 
     /**
      * Claim the active admin that authorises {@code setLockTaskPackages} / {@code
-     * setLockTaskFeatures}. Kiosk is the only thing in the client that needs one, so it is
-     * claimed when kiosk goes on and released when it goes off.
+     * setLockTaskFeatures}. Kiosk and lost mode are the only things in the client that need
+     * one, so it is claimed when either goes on and released when both are off.
      *
      * Deliberately NOT Device Owner: ownership cannot be deferred (setDeviceOwner is refused once
      * user setup has completed, DevicePolicyManagerService.STATUS_USER_SETUP_COMPLETED) and it
      * makes the device un-certifiable — GTS needs every non-test admin gone and cannot remove one
      * itself. The admin path has no such precondition.
      */
-    private static boolean ensureAdmin(DevicePolicyManager dpm, ComponentName admin) {
+    static boolean ensureAdmin(DevicePolicyManager dpm, ComponentName admin) {
         if (isAdminActive(dpm, admin)) return true;
         try {
             // refreshing=true, so a repeat call is a no-op rather than "Admin is already added".
@@ -301,12 +307,13 @@ public class KioskManager {
      * Runs at service start, so a client that used to claim an admin unconditionally (anything
      * before 1.1.0) hands it back without waiting for the next config change, and a device whose
      * kiosk was turned off while the client was down ends up clean too. The invariant is
-     * "an admin exists on this device if and only if kiosk is enabled for it".
+     * "an admin exists on this device if and only if kiosk is enabled for it" (or it is lost).
      *
      * Kiosk *on* but locally exited (offline exit) keeps the admin: the config still says enabled,
      * and the next reboot has to be able to re-lock without a server round trip.
      */
     public static void releaseAdminIfUnused(Context ctx, DevicePolicyManager dpm, ComponentName admin) {
+        if (LostMode.isOn(ctx)) return; // the lost screen's lock task needs the admin
         JSONObject config = loadConfig(ctx);
         if (config != null && config.optBoolean("kiosk_enabled", false)) return;
         releaseAdmin(dpm, admin);

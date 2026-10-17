@@ -1,6 +1,7 @@
 package com.aioapp.mdm;
 
 import android.app.AppOpsManager;
+import android.app.admin.DevicePolicyManager;
 import android.content.Context;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
@@ -23,7 +24,11 @@ import java.util.List;
  * so the server's compliance rules read one vocabulary across the whole fleet:
  *
  *   adb_enabled, adb_tcp, dev_options_enabled, unknown_sources, unknown_source_apps,
- *   su_present, build_type, build_tags, accessibility_services, play_protect
+ *   su_present, build_type, build_tags, accessibility_services, play_protect,
+ *   security_patch, verified_boot, selinux_enforcing, storage_encrypted
+ *
+ * A value the client cannot read goes as null, never as a guess: the server's checks count
+ * null as "unknown", which is neither pass nor fail.
  *
  * All reads are cheap except the per-package app-op scan, which is cached.
  */
@@ -65,6 +70,54 @@ final class SecurityPosture {
         extra.put("accessibility_services", accessibilityServices(ctx));
         // Google's app verification (Play Protect); vendor scripts turn it off.
         extra.put("play_protect", globalInt(ctx, "package_verifier_enable", 1) != 0);
+        // Compliance (1.12.0): the patch level, the bootloader's verdict on this image,
+        // SELinux mode and storage encryption.
+        String patch = Build.VERSION.SECURITY_PATCH;
+        extra.put("security_patch", patch == null || patch.isEmpty() ? JSONObject.NULL : patch);
+        String vb = SystemPropertiesProxy.get("ro.boot.verifiedbootstate", "");
+        extra.put("verified_boot", vb.isEmpty() ? JSONObject.NULL : vb);
+        extra.put("selinux_enforcing", selinuxEnforcing());
+        extra.put("storage_encrypted", storageEncrypted(ctx));
+    }
+
+    /** SELinux enforcing, from the platform's own call (system uid; hidden API). */
+    static Object selinuxEnforcing() {
+        try {
+            if (!android.os.SELinux.isSELinuxEnabled()) return false;
+            return android.os.SELinux.isSELinuxEnforced();
+        } catch (Throwable t) {
+            return JSONObject.NULL;
+        }
+    }
+
+    /**
+     * Storage encrypted. ACTIVE_DEFAULT_KEY counts: the data is encrypted, just not yet with a
+     * key derived from a user credential, which a kiosk never has. ro.crypto.state backs it up
+     * where the policy service cannot be asked.
+     */
+    static Object storageEncrypted(Context ctx) {
+        try {
+            DevicePolicyManager dpm = (DevicePolicyManager) ctx.getSystemService(Context.DEVICE_POLICY_SERVICE);
+            if (dpm != null) {
+                switch (dpm.getStorageEncryptionStatus()) {
+                    case DevicePolicyManager.ENCRYPTION_STATUS_ACTIVE:
+                    case DevicePolicyManager.ENCRYPTION_STATUS_ACTIVE_PER_USER:
+                    case DevicePolicyManager.ENCRYPTION_STATUS_ACTIVE_DEFAULT_KEY:
+                        return true;
+                    case DevicePolicyManager.ENCRYPTION_STATUS_INACTIVE:
+                    case DevicePolicyManager.ENCRYPTION_STATUS_UNSUPPORTED:
+                        return false;
+                    default:
+                        break;
+                }
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "encryption status: " + t.getMessage());
+        }
+        String state = SystemPropertiesProxy.get("ro.crypto.state", "");
+        if ("encrypted".equals(state)) return true;
+        if ("unencrypted".equals(state)) return false;
+        return JSONObject.NULL;
     }
 
     static boolean suPresent() {

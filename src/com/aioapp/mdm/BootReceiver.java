@@ -56,10 +56,13 @@ public class BootReceiver extends BroadcastReceiver {
                 // also flips the saved config to kiosk-off), so a reboot never traps the device
                 // back into kiosk.
                 JSONObject savedConfig = KioskManager.loadConfig(context);
-                if (savedConfig != null) {
-                    DevicePolicyManager dpm = (DevicePolicyManager)
-                            context.getSystemService(Context.DEVICE_POLICY_SERVICE);
-                    ComponentName admin = new ComponentName(context, MdmAdminReceiver.class);
+                DevicePolicyManager dpm = (DevicePolicyManager)
+                        context.getSystemService(Context.DEVICE_POLICY_SERVICE);
+                ComponentName admin = new ComponentName(context, MdmAdminReceiver.class);
+                if (LostMode.isOn(context)) {
+                    // Lost survives a reboot: the lost screen goes up before the kiosk app.
+                    LostMode.enforce(context, dpm, admin);
+                } else if (savedConfig != null) {
                     KioskManager.apply(context, dpm, admin, savedConfig);
                 }
             } catch (Exception e) {

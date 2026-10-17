@@ -371,6 +371,8 @@ public class MdmService extends Service {
 
     /** Sent by UnlockActivity after a verified PIN exit, to report the new state at once. */
     public static final String ACTION_KIOSK_EXITED = "com.aioapp.mdm.action.KIOSK_EXITED";
+    /** Lost mode was lifted on the device with the rotating code (UnlockActivity). */
+    public static final String ACTION_LOST_LIFTED = "com.aioapp.mdm.action.LOST_LIFTED";
 
     // Connection health
     private static final long HTTP_SAFETY_NET_MS = 5 * 60_000L;
@@ -432,6 +434,7 @@ public class MdmService extends Service {
         // admin with the kiosk config itself.
         releaseDeviceOwnerIfAny();
         KioskManager.releaseAdminIfUnused(this, dpm, adminComponent);
+        LostMode.enforce(this, dpm, adminComponent); // back up after a crash or a kill
 
         // A self-update the previous build started: this one reports how it went. Queued on
         // the executor because the ack may have to go over HTTP before the socket is up.
@@ -621,6 +624,11 @@ public class MdmService extends Service {
             forceKeyframe = true;
             sendTelemetryOverWs();
         }
+        if (intent != null && ACTION_LOST_LIFTED.equals(intent.getAction())) {
+            Log.i(TAG, "lost mode lifted with the unlock code — pushing immediate telemetry");
+            forceKeyframe = true;
+            sendTelemetryOverWs();
+        }
         if (networkAvailable && !polling) performCheckin();
         enforceKioskLock(); // self-heal: re-assert lock-task if it has dropped
         scheduleNextPoll();
@@ -638,6 +646,10 @@ public class MdmService extends Service {
      */
     private void enforceKioskLock() {
         try {
+            if (LostMode.isOn(this)) {  // the lost screen outranks the kiosk app
+                LostMode.enforce(this, dpm, adminComponent);
+                return;
+            }
             JSONObject cfg = KioskManager.loadConfig(this);
             if (cfg == null || !cfg.optBoolean("kiosk_enabled", false)) return;
             String pkg = cfg.optString("kiosk_package", "");
@@ -712,6 +724,12 @@ public class MdmService extends Service {
     private void performGestureKioskExit() {
         try {
             if (!isInKioskLock()) return;
+            // The gesture is the kiosk exit; it never lifts lost mode. Offer the code prompt,
+            // which in lost mode takes the rotating code only.
+            if (LostMode.isOn(this)) {
+                showUnlockPrompt();
+                return;
+            }
             KioskManager.suspendLocally(this, dpm, adminComponent);
             Log.i(TAG, "kiosk exited via Back+Power gesture — pushing immediate telemetry");
             // Report the exit AT ONCE so the dashboard flips immediately (like the charging
@@ -2390,6 +2408,43 @@ public class MdmService extends Service {
                           + (until > 0 ? ", off after " + hours + " h" : ", stays on"));
                 break;
             }
+            case "lost_mode": {
+                // Lost screen on or off (LostMode). Off restores the lock the device should
+                // have, from the saved kiosk config the server keeps current.
+                boolean on = payload.optBoolean("on", false);
+                if (KioskManager.isFactoryTestBoot()) {
+                    reportTerminal(cmdId, serialNumber, "failed", "factory test boot");
+                    break;
+                }
+                if (on) {
+                    LostMode.turnOn(this, dpm, adminComponent, payload.optString("message", ""),
+                            payload.optString("phone", ""), serialNumber);
+                } else {
+                    LostMode.lift(this, dpm, adminComponent);
+                }
+                forceKeyframe = true;
+                reportTerminal(cmdId, serialNumber, "completed",
+                        new JSONObject().put("lost_mode", on).toString());
+                sendTelemetryOverWs();
+                break;
+            }
+            case "wifi_config": {
+                // Add/update or forget a saved Wi-Fi network (WifiConfig). Never touches the
+                // network the device is on, so a venue can add its new network first.
+                String err = WifiConfig.apply(this, payload);
+                String ssid = payload.optString("ssid", "");
+                String action = payload.optString("action", "");
+                if (err == null) {
+                    forceKeyframe = true;
+                    reportTerminal(cmdId, serialNumber, "completed", new JSONObject()
+                            .put("ok", true).put("ssid", ssid).put("action", action).toString());
+                    sendTelemetryOverWs();
+                } else {
+                    reportTerminal(cmdId, serialNumber, "failed",
+                            new JSONObject().put("error", err).put("ssid", ssid).toString());
+                }
+                break;
+            }
             case "reboot": {
                 // Server marks reboot commands completed at delivery — no ack needed
                 PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
@@ -3373,6 +3428,13 @@ public class MdmService extends Service {
         // This client runs the "wipe" command (factory reset). A flag, not extra.capabilities:
         // a capabilities list from this client would replace the server's firmware defaults.
         extra.put("factory_reset", true);
+        // This client runs lost_mode and wifi_config (1.12.0+). Flags for the same reason.
+        extra.put("lost_mode_cmd", true);
+        extra.put("wifi_config_cmd", true);
+        // Lost mode as it stands on the device, and the saved Wi-Fi networks (no passwords).
+        extra.put("lost_mode", LostMode.report(MdmService.this));
+        JSONArray savedWifi = WifiConfig.networks(MdmService.this);
+        if (savedWifi != null) extra.put("wifi_networks", savedWifi);
         // The Android IDs the Nugget apps see, which only the OS knows (see getNuggetAndroidIds).
         JSONArray nuggetIds = getNuggetAndroidIds();
         if (nuggetIds.length() > 0) extra.put("app_android_ids", nuggetIds);
@@ -3629,6 +3691,10 @@ public class MdmService extends Service {
             // once rather than waiting for the next keyframe.
             "adb_enabled", "adb_tcp", "dev_options_enabled", "unknown_sources",
             "unknown_source_apps", "su_present", "accessibility_services", "play_protect",
+            // Compliance (1.12.0): build facts that change with an OTA, not minute to minute.
+            "security_patch", "verified_boot", "selinux_enforcing", "storage_encrypted",
+            // Lost mode switching on or off, and a Wi-Fi network added or forgotten.
+            "lost_mode", "wifi_networks",
             // Kiosk exited on the device with the PIN, and the timestamp the server acks
             // to clear it. Neither was volatile nor gated, so a flip did not even wake a
             // delta send: the exit reached the server on the next keyframe at best, and
@@ -3664,6 +3730,8 @@ public class MdmService extends Service {
         for (String k : VOLATILE_EXTRA_KEYS) {
             if (curExtra.has(k)) extra.put(k, curExtra.get(k));
         }
+        // A lost device sends its Wi-Fi scan in every frame, so the server can keep locating it.
+        if (LostMode.isOn(this) && curExtra.has("wifi_scan")) extra.put("wifi_scan", curExtra.get("wifi_scan"));
         synchronized (baselineLock) {
             for (String k : GATED_EXTRA_KEYS) {
                 // A key that is gone (host_app once the server names no host app) goes as
@@ -4263,6 +4331,13 @@ public class MdmService extends Service {
             Log.e(LOCATION_TAG, "WiFi scan error: " + e.getMessage());
         }
         Log.i(LOCATION_TAG, "WiFi scan complete: " + (cachedWifiScan != null ? cachedWifiScan.length() : 0) + " APs in cache");
+        // A pending change to the network the device was on goes in once that network is
+        // gone, and comes back out if it does not connect (WifiConfig).
+        try {
+            WifiConfig.tick(this);
+        } catch (Throwable t) {
+            Log.w(TAG, "wifi pending tick: " + t.getMessage());
+        }
     }
 
     private JSONObject getRamUsageMb() throws JSONException {
