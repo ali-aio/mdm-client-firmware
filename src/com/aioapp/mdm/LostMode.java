@@ -15,8 +15,9 @@ import org.json.JSONObject;
 
 /**
  * Lost mode: the device shows {@link LostActivity} — a message, a phone number, its serial —
- * pinned with lock task, until the server lifts it with {@code lost_mode {"on": false}} or a
- * technician enters the rotating unlock code from the device page (UnlockActivity, TOTP only).
+ * pinned with lock task, until the server lifts it with {@code lost_mode {"on": false}}.
+ * Nothing on the device lifts it: the exit PIN is in every client, so it cannot be what
+ * releases a device someone has walked off with.
  *
  * Lost mode sits above lock (kiosk): while it is on, {@link KioskManager#apply} does nothing
  * but re-assert it, so a config push or the kiosk watchdog can never swap the lost screen

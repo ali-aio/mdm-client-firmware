@@ -20,8 +20,8 @@ import android.widget.TextView;
 /**
  * The lost-mode screen (see {@link LostMode}): what the device is, who to call, its serial.
  * Nothing on it can be tapped — touches are swallowed and Back does nothing; lock task keeps
- * home, recents, notifications and the status bar away. Five Power presses still open the
- * unlock prompt, which in lost mode accepts the rotating code only.
+ * home, recents, notifications and the status bar away. The five-Power-press exit prompt does
+ * not open while lost; only the dashboard lifts it.
  *
  * Laid out in code like UnlockActivity, with no theme, layout or font the image may lack.
  * The text block is centred and width-capped, so it reads the same on the T7 in landscape

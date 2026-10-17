@@ -53,7 +53,7 @@ public class KioskManager {
             String pkg = config.optString("kiosk_package", "");
 
             if (enabled && !pkg.isEmpty()) {
-                // A technician exited kiosk offline (TOTP): honour that local suspension and do
+                // A technician exited kiosk offline (exit PIN): honour that local suspension and do
                 // NOT re-lock, even though the server config still says kiosk_enabled. The flag is
                 // cleared on reboot (BootReceiver) — reboot re-locks — or when the server pushes
                 // kiosk_enabled=false (the else branch below), so an admin can re-lock via toggle.

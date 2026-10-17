@@ -53,8 +53,7 @@ public class MdmService extends Service {
 
     // Kiosk-exit gesture: SystemUI's long-press-Back arms an exit by writing this Settings.Secure
     // key (watched below via ContentObserver); the technician confirms by pressing Power
-    // (screen-off) within the window below. Retires the TOTP prompt without removing the code
-    // from the tree.
+    // (screen-off) within the window below.
     //
     // Not a broadcast+signature-permission (what this used to be): that grant is computed when
     // PackageManager rescans the *requesting* package (SystemUI), and this device's OTA path
@@ -371,8 +370,6 @@ public class MdmService extends Service {
 
     /** Sent by UnlockActivity after a verified PIN exit, to report the new state at once. */
     public static final String ACTION_KIOSK_EXITED = "com.aioapp.mdm.action.KIOSK_EXITED";
-    /** Lost mode was lifted on the device with the rotating code (UnlockActivity). */
-    public static final String ACTION_LOST_LIFTED = "com.aioapp.mdm.action.LOST_LIFTED";
 
     // Connection health
     private static final long HTTP_SAFETY_NET_MS = 5 * 60_000L;
@@ -624,11 +621,6 @@ public class MdmService extends Service {
             forceKeyframe = true;
             sendTelemetryOverWs();
         }
-        if (intent != null && ACTION_LOST_LIFTED.equals(intent.getAction())) {
-            Log.i(TAG, "lost mode lifted with the unlock code — pushing immediate telemetry");
-            forceKeyframe = true;
-            sendTelemetryOverWs();
-        }
         if (networkAvailable && !polling) performCheckin();
         enforceKioskLock(); // self-heal: re-assert lock-task if it has dropped
         scheduleNextPoll();
@@ -724,12 +716,8 @@ public class MdmService extends Service {
     private void performGestureKioskExit() {
         try {
             if (!isInKioskLock()) return;
-            // The gesture is the kiosk exit; it never lifts lost mode. Offer the code prompt,
-            // which in lost mode takes the rotating code only.
-            if (LostMode.isOn(this)) {
-                showUnlockPrompt();
-                return;
-            }
+            // The gesture is the kiosk exit; it never lifts lost mode — only the dashboard does.
+            if (LostMode.isOn(this)) return;
             KioskManager.suspendLocally(this, dpm, adminComponent);
             Log.i(TAG, "kiosk exited via Back+Power gesture — pushing immediate telemetry");
             // Report the exit AT ONCE so the dashboard flips immediately (like the charging
@@ -1721,7 +1709,7 @@ public class MdmService extends Service {
         } catch (Exception e) {
             Log.e(TAG, "guest info save error: " + e.getMessage());
         }
-        // Offline kiosk-exit policy (TOTP seed + settings) is provisioned via config;
+        // Offline kiosk-exit policy (the exit PIN) is provisioned via config;
         // store it before applying kiosk policy so a suspended device is respected.
         try {
             KioskExit.savePolicy(MdmService.this, config.optJSONObject("offline_exit"));
@@ -3479,10 +3467,9 @@ public class MdmService extends Service {
         // XML (not a trinket audio platform). See MicGain for why this isn't a live read.
         JSONObject micGain = MicGain.snapshot();
         if (micGain != null) extra.put("mic_gain", micGain);
-        // Offline kiosk-exit: ack that the TOTP seed is provisioned, and surface a pending
-        // "exited kiosk offline" event (epoch secs) so the server can audit/alert. The event
-        // keeps riding check-ins until the server echoes offline_exit_ack (see applyConfig).
-        extra.put("offline_exit_seed_set", KioskExit.seedSet(MdmService.this));
+        // Offline kiosk-exit: surface a pending "exited kiosk offline" event (epoch secs) so
+        // the server can audit/alert. The event keeps riding check-ins until the server
+        // echoes offline_exit_ack (see applyConfig).
         // Actual live kiosk state: true once a technician has exited offline (the device is
         // out of lock-task even though the server's desired config still says kiosk on).
         extra.put("kiosk_suspended", KioskExit.isSuspended(MdmService.this));

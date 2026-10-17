@@ -6,7 +6,7 @@ import android.util.Log;
 import org.json.JSONObject;
 
 /**
- * State for the OFFLINE kiosk-exit feature: the provisioned TOTP seed and policy, the
+ * State for the OFFLINE kiosk-exit feature: the exit PIN, the
  * local "suspended" flag (set when a technician has exited kiosk without the server),
  * brute-force rate limiting, and a pending "I was exited offline" event to report on
  * the next check-in.
@@ -20,6 +20,7 @@ public final class KioskExit {
     private static final String PREFS = "mdm_kiosk_exit";
 
     private static final String K_ENABLED   = "enabled";
+    // The rotating (TOTP) code was removed in 1.12.1; its old keys are cleared on the next policy save.
     private static final String K_SEED      = "seed";
     private static final String K_DIGITS    = "digits";
     private static final String K_PERIOD    = "period";
@@ -31,9 +32,9 @@ public final class KioskExit {
     private static final String K_PIN       = "pin";        // static exit PIN (server-pushed)
 
     /**
-     * Static exit PIN used until the server pushes one in offline_exit.pin. The TOTP path
-     * needs the dashboard, which is exactly what a technician standing at an offline device
-     * does not have; this PIN is what the power-press exit prompt accepts.
+     * Static exit PIN used until the server pushes one in offline_exit.pin; this PIN is what
+     * the power-press exit prompt accepts. (The rotating code it used to accept as well was
+     * removed in 1.12.1.)
      */
     private static final String DEFAULT_PIN = "147147";
 
@@ -49,40 +50,26 @@ public final class KioskExit {
     }
 
     /**
-     * Ingest the server's offline_exit config block. Offline exit is part of kiosk (not a
-     * separate opt-in): the block just carries the unlock seed + code parameters. The seed
-     * is stored the first time we see it and kept on later pushes.
+     * Ingest the server's offline_exit config block: a server-pushed PIN, when there is one.
+     * A seed an older server still sends is ignored, and one stored by an earlier client is
+     * dropped — the rotating code no longer unlocks anything.
      */
     public static void savePolicy(Context ctx, JSONObject offline) {
         if (offline == null) return;
         SharedPreferences.Editor e = prefs(ctx).edit();
-        e.putInt(K_DIGITS, offline.optInt("digits", 6));
-        e.putInt(K_PERIOD, offline.optInt("period", 60));
-        String seed = offline.optString("seed", "");
-        if (!seed.isEmpty()) e.putString(K_SEED, seed);
+        e.remove(K_SEED).remove(K_DIGITS).remove(K_PERIOD);
         String pin = offline.optString("pin", "");
         if (!pin.isEmpty()) e.putString(K_PIN, pin);
         e.apply();
-        Log.i(TAG, "offline-exit seed provisioned=" + seedSet(ctx));
     }
 
-    /**
-     * Offline exit is usable once a seed is provisioned — or always, since the PIN path
-     * falls back to DEFAULT_PIN and needs no provisioning at all.
-     */
+    /** Offline exit is always usable: the PIN falls back to DEFAULT_PIN and needs no provisioning. */
     public static boolean isEnabled(Context ctx) {
-        return seedSet(ctx) || !pin(ctx).isEmpty();
+        return !pin(ctx).isEmpty();
     }
 
-    public static boolean seedSet(Context ctx) {
-        return !prefs(ctx).getString(K_SEED, "").isEmpty();
-    }
-
-    private static String seed(Context ctx)   { return prefs(ctx).getString(K_SEED, ""); }
     /** The server-pushed PIN, or the compiled-in default when none has been pushed. */
     private static String pin(Context ctx)    { return prefs(ctx).getString(K_PIN, DEFAULT_PIN); }
-    private static int digits(Context ctx)    { return prefs(ctx).getInt(K_DIGITS, 6); }
-    private static int period(Context ctx)    { return prefs(ctx).getInt(K_PERIOD, 60); }
 
     // ── exited guard (device left kiosk locally; survives reboot until the server acks) ──
     public static boolean isSuspended(Context ctx) { return prefs(ctx).getBoolean(K_SUSPENDED, false); }
@@ -98,42 +85,11 @@ public final class KioskExit {
         return Math.max(0, prefs(ctx).getLong(K_LOCKOUT, 0) - System.currentTimeMillis());
     }
 
-    /**
-     * Verify an entered code; on success clears failures and returns true. Rate-limited.
-     * Accepts either the static exit PIN or the rotating TOTP code — a technician with the
-     * dashboard open and one standing at a dead-offline device both get in.
-     */
+    /** Verify an entered exit PIN; on success clears failures and returns true. Rate-limited. */
     public static boolean verify(Context ctx, String code) {
         if (isLockedOut(ctx)) return false;
         String expectedPin = pin(ctx);
-        boolean ok = (!expectedPin.isEmpty() && expectedPin.equals(code))
-                || (seedSet(ctx) && Totp.verify(seed(ctx), code, System.currentTimeMillis() / 1000L,
-                        digits(ctx), period(ctx)));
-        SharedPreferences p = prefs(ctx);
-        if (ok) {
-            p.edit().putInt(K_FAILS, 0).putLong(K_LOCKOUT, 0).apply();
-            return true;
-        }
-        int fails = p.getInt(K_FAILS, 0) + 1;
-        SharedPreferences.Editor e = p.edit().putInt(K_FAILS, fails);
-        if (fails >= MAX_FAILS) {
-            e.putInt(K_FAILS, 0).putLong(K_LOCKOUT, System.currentTimeMillis() + LOCKOUT_MS);
-        }
-        e.apply();
-        return false;
-    }
-
-    /**
-     * Verify the rotating code only — the static exit PIN is deliberately not accepted. Lost
-     * mode uses this: the PIN is compiled into every client and known to every technician,
-     * so it cannot be what releases a device someone has walked off with; the rotating code
-     * comes from the device page, i.e. from someone signed in to the dashboard. Shares the
-     * failure count and lockout with {@link #verify}.
-     */
-    public static boolean verifyRotating(Context ctx, String code) {
-        if (isLockedOut(ctx)) return false;
-        boolean ok = seedSet(ctx) && Totp.verify(seed(ctx), code, System.currentTimeMillis() / 1000L,
-                digits(ctx), period(ctx));
+        boolean ok = !expectedPin.isEmpty() && expectedPin.equals(code);
         SharedPreferences p = prefs(ctx);
         if (ok) {
             p.edit().putInt(K_FAILS, 0).putLong(K_LOCKOUT, 0).apply();

@@ -80,11 +80,28 @@ final class SecurityPosture {
         extra.put("storage_encrypted", storageEncrypted(ctx));
     }
 
-    /** SELinux enforcing, from the platform's own call (system uid; hidden API). */
+    /**
+     * SELinux enforcing. Not SELinux.isSELinuxEnforced(): it reads /sys/fs/selinux/enforce and
+     * answers false when that read is refused, which is what a system_app gets on our images
+     * (1.12.0 reported "not enforcing" from every T7 that way). The file is world-readable
+     * (0644), so a refusal can only come from SELinux itself — and SELinux refuses only when
+     * it is enforcing; a permissive kernel logs the denial and lets the read through.
+     */
     static Object selinuxEnforcing() {
         try {
             if (!android.os.SELinux.isSELinuxEnabled()) return false;
-            return android.os.SELinux.isSELinuxEnforced();
+        } catch (Throwable t) {
+            return JSONObject.NULL;
+        }
+        try (java.io.FileInputStream in = new java.io.FileInputStream("/sys/fs/selinux/enforce")) {
+            int c = in.read();
+            if (c == '1') return true;
+            if (c == '0') return false;
+            return JSONObject.NULL;
+        } catch (java.io.FileNotFoundException e) {
+            // FileInputStream reports EACCES as FileNotFoundException("… (Permission denied)").
+            String m = e.getMessage();
+            return m != null && m.contains("Permission denied") ? (Object) true : JSONObject.NULL;
         } catch (Throwable t) {
             return JSONObject.NULL;
         }
