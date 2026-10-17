@@ -119,11 +119,21 @@ final class WifiConfig {
 
     private static String remove(Context ctx, WifiManager wm, String ssid) {
         if (ssid.equals(connectedSsid(wm))) return "connected";
+        // A WPA2/WPA3 transition network is listed twice (one config per security type) under
+        // one networkId: remove each id once, and judge by whether the name is still saved —
+        // the second removeNetwork of an id that is already gone answers false.
         List<WifiConfiguration> list = wm.getConfiguredNetworks();
         if (list != null) {
+            java.util.Set<Integer> done = new java.util.HashSet<>();
             for (WifiConfiguration c : list) {
-                if (ssid.equals(unquote(c.SSID)) && !wm.removeNetwork(c.networkId)) {
-                    return "the system refused to forget it";
+                if (ssid.equals(unquote(c.SSID)) && done.add(c.networkId)) {
+                    wm.removeNetwork(c.networkId);
+                }
+            }
+            List<WifiConfiguration> after = wm.getConfiguredNetworks();
+            if (after != null) {
+                for (WifiConfiguration c : after) {
+                    if (ssid.equals(unquote(c.SSID))) return "the system refused to forget it";
                 }
             }
         }
