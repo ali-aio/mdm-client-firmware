@@ -80,6 +80,10 @@ final class WifiConfig {
         if (!"open".equals(security) && (password.length() < 8 || password.length() > 63)) {
             return "password must be 8–63 characters";
         }
+        // A WPA3 network saved on a radio without SAE could never connect: refuse it instead.
+        if ("wpa3".equals(security) && !wm.isWpa3SaeSupported()) {
+            return "wpa3 not supported on this device";
+        }
         WifiConfiguration existing = find(wm, ssid);
         if (existing != null && ssid.equals(connectedSsid(wm))) {
             if (sameCredentials(wm, existing, security, password)) {
