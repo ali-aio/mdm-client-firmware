@@ -160,6 +160,37 @@ final class BleLost {
         p.edit().putBoolean(K_BT_OURS, false).commit();
     }
 
+    private static int stuckSeen = 0;
+
+    /**
+     * The Bluetooth setting is on while the radio stays off, and nothing of ours wants it: a
+     * controller that will not start, left "on" (1.13.0 did that on T7 v2.1.034, whose QTI UART
+     * HAL then restarts in a loop for as long as the setting holds). Seen on two checks in a
+     * row it is switched off — on a working radio that state never lasts, so this never turns
+     * off a Bluetooth someone is using.
+     */
+    private static void clearStuckSetting(Context ctx) {
+        if (scanning) { stuckSeen = 0; return; }
+        BluetoothAdapter a = adapter(ctx);
+        if (a == null) return;
+        int on;
+        try {
+            on = android.provider.Settings.Global.getInt(ctx.getContentResolver(), android.provider.Settings.Global.BLUETOOTH_ON, 0);
+        } catch (Throwable t) {
+            return;
+        }
+        if (on != 1 || a.getState() != BluetoothAdapter.STATE_OFF) { stuckSeen = 0; return; }
+        if (++stuckSeen < 2) return;
+        stuckSeen = 0;
+        try {
+            a.disable();
+            prefs(ctx).edit().putBoolean(K_BT_OURS, false).putLong(K_BT_FAILED_AT, System.currentTimeMillis()).commit();
+            Log.i(TAG, "bluetooth was set on but never started; switched the setting off");
+        } catch (Throwable t) {
+            Log.w(TAG, "could not clear the stuck bluetooth setting: " + t.getMessage());
+        }
+    }
+
     // ── beacon (the lost device) ────────────────────────────────────────────────────────────
 
     private static volatile boolean advertising = false;
@@ -196,6 +227,7 @@ final class BleLost {
             if (advertising) stopAdvertising(ctx);
             beaconStatus = null;
             releaseIfOurs(ctx);
+            clearStuckSetting(ctx);
             return;
         }
         if (advertising) {
