@@ -36,6 +36,8 @@ final class LostMode {
     private static final String K_MESSAGE = "message";
     private static final String K_PHONE = "phone";
     private static final String K_SERIAL = "serial";
+    private static final String K_BEACON = "beacon"; // BLE token from the server (1.13.0), hex
+    private static final String K_SELF = "self";     // turned on by SelfLock, not the server
 
     static final int MAX_MESSAGE = 280;
     static final int MAX_PHONE = 40;
@@ -55,8 +57,12 @@ final class LostMode {
     static String message(Context ctx) { return prefs(ctx).getString(K_MESSAGE, ""); }
     static String phone(Context ctx) { return prefs(ctx).getString(K_PHONE, ""); }
     static String serial(Context ctx) { return prefs(ctx).getString(K_SERIAL, ""); }
+    /** The BLE beacon token the server gave this lost session ("" when none). */
+    static String beacon(Context ctx) { return prefs(ctx).getString(K_BEACON, ""); }
+    /** Lost mode was put up by the device itself when it left its venue (SelfLock). */
+    static boolean isSelf(Context ctx) { return isOn(ctx) && prefs(ctx).getBoolean(K_SELF, false); }
 
-    /** extra.lost_mode: {"on": true, "since_ms", "message"} or {"on": false}. */
+    /** extra.lost_mode: {"on": true, "since_ms", "message", "self"?} or {"on": false}. */
     static JSONObject report(Context ctx) throws JSONException {
         JSONObject o = new JSONObject();
         boolean on = isOn(ctx);
@@ -64,6 +70,7 @@ final class LostMode {
         if (on) {
             o.put("since_ms", prefs(ctx).getLong(K_SINCE, 0));
             o.put("message", message(ctx));
+            if (isSelf(ctx)) o.put("self", true);
         }
         return o;
     }
@@ -71,12 +78,26 @@ final class LostMode {
     /** Turn lost mode on (or update its text while on) and put the lost screen up. */
     static void turnOn(Context ctx, DevicePolicyManager dpm, ComponentName admin,
                        String message, String phone, String serial) {
+        turnOn(ctx, dpm, admin, message, phone, serial, "", false);
+    }
+
+    /**
+     * As above, with the server's BLE beacon token (1.13.0) and whether the device is doing
+     * this itself (SelfLock). A server command always clears "self": once the dashboard has
+     * marked it lost, only the dashboard lifts it.
+     */
+    static void turnOn(Context ctx, DevicePolicyManager dpm, ComponentName admin,
+                       String message, String phone, String serial, String beacon, boolean self) {
         SharedPreferences p = prefs(ctx);
+        String token = beacon == null ? "" : beacon.trim().toLowerCase(java.util.Locale.ROOT);
+        if (!token.matches("[0-9a-f]{16}")) token = "";
         SharedPreferences.Editor e = p.edit()
                 .putBoolean(K_ON, true)
                 .putString(K_MESSAGE, clip(message, MAX_MESSAGE))
                 .putString(K_PHONE, clip(phone, MAX_PHONE))
-                .putString(K_SERIAL, serial == null ? "" : serial);
+                .putString(K_SERIAL, serial == null ? "" : serial)
+                .putString(K_BEACON, token)
+                .putBoolean(K_SELF, self);
         if (!p.getBoolean(K_ON, false)) e.putLong(K_SINCE, System.currentTimeMillis());
         e.commit(); // committed before the screen goes up, so a crash right after keeps it
         try {

@@ -113,6 +113,7 @@ final class WifiConfig {
         if (id < 0) return "the system refused the network";
         wm.enableNetwork(id, false); // allowed to join; do not leave the current network for it
         clearPending(ctx, ssid);
+        SelfLock.rememberNetwork(ctx, ssid); // a venue network: its presence means "still here"
         Log.i(TAG, (existing != null ? "updated " : "added ") + ssid + " (" + security + ")");
         return null;
     }

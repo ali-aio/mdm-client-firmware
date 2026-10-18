@@ -204,6 +204,11 @@ public class MdmService extends Service {
     private volatile java.lang.reflect.Method screenshotMethod;
     private volatile boolean screenshotMethodResolved;
     private ScheduledExecutorService wifiScanExecutor;
+    // Lost-device reporting over Bluetooth LE (BleLost): the beacon while lost, and listening
+    // for lost devices nearby while the server asks for it. Its own thread, because switching
+    // Bluetooth on and scanning block for seconds.
+    private ScheduledExecutorService bleExecutor;
+    private int bleTicks = 0;
 
     // Battery: registered once in onCreate, updated via sticky broadcast
     private volatile Intent cachedBatteryIntent = null;
@@ -432,6 +437,8 @@ public class MdmService extends Service {
         releaseDeviceOwnerIfAny();
         KioskManager.releaseAdminIfUnused(this, dpm, adminComponent);
         LostMode.enforce(this, dpm, adminComponent); // back up after a crash or a kill
+        bleExecutor = Executors.newSingleThreadScheduledExecutor();
+        bleExecutor.scheduleWithFixedDelay(this::bleTick, 5, 10, TimeUnit.SECONDS);
 
         // A self-update the previous build started: this one reports how it went. Queued on
         // the executor because the ack may have to go over HTTP before the socket is up.
@@ -1702,6 +1709,14 @@ public class MdmService extends Service {
         if (config.has("host_app_pattern")) {
             HostApp.savePattern(MdmService.this, config.optString("host_app_pattern", ""));
         }
+        // Lost-device reporting (1.13.0): which lost beacons to listen for nearby, and whether
+        // this device locks itself when it leaves its venue. Absent means off for both.
+        try {
+            BleLost.saveListen(MdmService.this, config);
+            SelfLock.saveConfig(MdmService.this, config);
+        } catch (Exception e) {
+            Log.e(TAG, "lost reporting config error: " + e.getMessage());
+        }
         // Guest info for the home and lock screens (HTTP check-ins carry it; over the socket
         // it comes as its own "guest" frame). A config without it leaves what we have.
         try {
@@ -1821,12 +1836,43 @@ public class MdmService extends Service {
         });
     }
 
+    /** The 8 strongest APs of the last kept offline reading, by BSSID (Wi-Fi diary, 1.13.0). */
+    private java.util.Set<String> lastQueuedBssids = new java.util.HashSet<>();
+
+    /**
+     * The 8 strongest APs of the latest scan, when they are not the set the previous kept
+     * reading carried — a device moving while out of reach leaves a trail the server can place
+     * on a map later; one sitting offline on its dock adds nothing. Null when unchanged.
+     */
+    private JSONArray offlineWifiDiary() {
+        JSONArray scan = cachedWifiScan;
+        if (scan == null || scan.length() == 0) return null;
+        List<JSONObject> aps = new ArrayList<>();
+        for (int i = 0; i < scan.length(); i++) {
+            JSONObject ap = scan.optJSONObject(i);
+            if (ap != null && !ap.optString("bssid", "").isEmpty()) aps.add(ap);
+        }
+        Collections.sort(aps, (a, b) -> Integer.compare(b.optInt("rssi", -127), a.optInt("rssi", -127)));
+        JSONArray top = new JSONArray();
+        java.util.Set<String> ids = new java.util.HashSet<>();
+        for (JSONObject ap : aps) {
+            if (top.length() >= 8) break;
+            top.put(ap);
+            ids.add(ap.optString("bssid"));
+        }
+        if (ids.equals(lastQueuedBssids)) return null;
+        lastQueuedBssids = ids;
+        return top;
+    }
+
     /** The fields the server keeps as history, with the times it needs to place them. */
     private JSONObject offlineReading() throws JSONException {
         JSONObject p = buildCheckinPayload();
         JSONObject extra = p.optJSONObject("extra");
         JSONObject r = new JSONObject();
         r.put("at_ms", System.currentTimeMillis());
+        JSONArray diary = offlineWifiDiary();
+        if (diary != null) r.put("wifi_scan", diary);
         r.put("elapsed_ms", android.os.SystemClock.elapsedRealtime());
         r.put("boot_id", getBootId());
         int bat = p.optInt("battery_pct", -1);
@@ -2406,10 +2452,13 @@ public class MdmService extends Service {
                 }
                 if (on) {
                     LostMode.turnOn(this, dpm, adminComponent, payload.optString("message", ""),
-                            payload.optString("phone", ""), serialNumber);
+                            payload.optString("phone", ""), serialNumber,
+                            payload.optString("beacon", ""), false);
                 } else {
                     LostMode.lift(this, dpm, adminComponent);
                 }
+                // The beacon follows lost mode at once rather than at the next tick.
+                if (bleExecutor != null) bleExecutor.execute(() -> BleLost.syncBeacon(this));
                 forceKeyframe = true;
                 reportTerminal(cmdId, serialNumber, "completed",
                         new JSONObject().put("lost_mode", on).toString());
@@ -3421,6 +3470,12 @@ public class MdmService extends Service {
         extra.put("wifi_config_cmd", true);
         // Lost mode as it stands on the device, and the saved Wi-Fi networks (no passwords).
         extra.put("lost_mode", LostMode.report(MdmService.this));
+        // Lost-device reporting over Bluetooth LE (1.13.0): what the hardware can do, the
+        // beacon's state while lost, and what this device heard while listening.
+        BleLost.putCapabilities(MdmService.this, extra);
+        JSONObject beacon = BleLost.beaconReport(MdmService.this);
+        if (beacon != null) extra.put("lost_beacon", beacon);
+        BleLost.putListenReport(MdmService.this, extra);
         JSONArray savedWifi = WifiConfig.networks(MdmService.this);
         if (savedWifi != null) extra.put("wifi_networks", savedWifi);
         // The Android IDs the Nugget apps see, which only the OS knows (see getNuggetAndroidIds).
@@ -3682,6 +3737,9 @@ public class MdmService extends Service {
             "security_patch", "verified_boot", "selinux_enforcing", "storage_encrypted",
             // Lost mode switching on or off, and a Wi-Fi network added or forgotten.
             "lost_mode", "wifi_networks",
+            // Lost-device reporting (1.13.0): beacon state, what was heard, scan trouble, and
+            // the capability flags (they only change when Bluetooth hardware is first seen).
+            "lost_beacon", "ble_sightings", "ble_scan", "ble_listen", "ble_beacon",
             // Kiosk exited on the device with the PIN, and the timestamp the server acks
             // to clear it. Neither was volatile nor gated, so a flip did not even wake a
             // delta send: the exit reached the server on the next keyframe at best, and
@@ -4255,6 +4313,7 @@ public class MdmService extends Service {
     /** Runs on wifiScanExecutor every WIFI_SCAN_INTERVAL_SEC; blocks up to 5s per scan. */
     private void runWifiScan() {
         Log.i(LOCATION_TAG, "Starting WiFi scan...");
+        boolean scanOk = false;
         try {
             WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
             if (wm == null) {
@@ -4300,6 +4359,7 @@ public class MdmService extends Service {
 
             List<ScanResult> results = holder[0];
             if (results != null) {
+                scanOk = true;
                 cachedWifiScan = new JSONArray();
                 Log.i(LOCATION_TAG, "WiFi scan returned " + results.size() + " APs");
                 for (ScanResult sr : results) {
@@ -4324,6 +4384,34 @@ public class MdmService extends Service {
             WifiConfig.tick(this);
         } catch (Throwable t) {
             Log.w(TAG, "wifi pending tick: " + t.getMessage());
+        }
+        // Self-lock (1.13.0): has the device left its venue, or come back to it?
+        if (dpm != null) {
+            try {
+                WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+                WifiInfo info = wm == null ? null : wm.getConnectionInfo();
+                boolean phoneOnPad = product.hasWlc() && getWlcStatus() == 1;
+                if (SelfLock.onScan(this, dpm, adminComponent, scanOk ? cachedWifiScan : null,
+                        info == null ? "" : info.getSSID(), phoneOnPad, getDeviceSerial())) {
+                    forceKeyframe = true;
+                    sendTelemetryOverWs();
+                }
+            } catch (Throwable t) {
+                Log.w(TAG, "self-lock tick: " + t.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Every 10 s on bleExecutor: listen for lost devices when the server asks (BleLost does the
+     * timing), and once a minute bring the lost beacon in line with lost mode.
+     */
+    private void bleTick() {
+        try {
+            if (BleLost.listenTick(this)) sendTelemetryOverWs();
+            if (bleTicks++ % 6 == 0) BleLost.syncBeacon(this);
+        } catch (Throwable t) {
+            Log.w(TAG, "ble tick: " + t.getMessage());
         }
     }
 
@@ -4729,6 +4817,7 @@ public class MdmService extends Service {
         if (wlcWatcher != null) wlcWatcher.shutdownNow();
         if (commandPoller != null) commandPoller.shutdownNow();
         if (wifiScanExecutor != null) wifiScanExecutor.shutdownNow();
+        if (bleExecutor != null) bleExecutor.shutdownNow();
         if (wsClient != null) wsClient.stop();
         if (networkCallback != null) {
             try { connectivityManager.unregisterNetworkCallback(networkCallback); } catch (Exception ignored) {}
