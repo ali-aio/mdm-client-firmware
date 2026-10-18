@@ -56,6 +56,11 @@ final class BleLost {
 
     private static final String PREFS = "mdm_ble_lost";
     private static final String K_BT_OURS = "bt_enabled_by_us"; // we switched the adapter on
+    // When the adapter last failed to come on (wall clock ms). A T7 image whose Bluetooth
+    // controller does not start (v2.1.034: the QTI UART HAL crash-loops while the setting is on)
+    // must not be asked again every minute — each try leaves the HAL restarting.
+    private static final String K_BT_FAILED_AT = "bt_failed_at";
+    private static final long BT_RETRY_MS = 6 * 60 * 60 * 1000L;
     private static final String K_ADV_OK = "adv_supported";     // last known: 1 yes, 0 no, absent unknown
     private static final String K_LISTEN = "listen";            // the lost_listen object, as JSON
 
@@ -86,6 +91,12 @@ final class BleLost {
     /** Puts the capability flags in extra: what this hardware can do, not what it is doing. */
     static void putCapabilities(Context ctx, JSONObject extra) throws JSONException {
         if (!hasLe(ctx)) return;
+        // Not while the radio is known not to start: the server then leaves this device out of
+        // listen lists instead of asking it to scan with a dead adapter.
+        if (btBroken(ctx)) {
+            extra.put("ble_broken", true);
+            return;
+        }
         extra.put("ble_listen", true);
         BluetoothAdapter a = adapter(ctx);
         // isMultipleAdvertisementSupported only answers while the adapter is on; remember the
@@ -100,10 +111,16 @@ final class BleLost {
     // ── adapter on/off, owned between the two halves ────────────────────────────────────────
 
     /** Makes sure the adapter is on; returns false when it can't be (and why, in why[0]). */
+    private static boolean btBroken(Context ctx) {
+        long at = prefs(ctx).getLong(K_BT_FAILED_AT, 0);
+        return at > 0 && System.currentTimeMillis() - at < BT_RETRY_MS;
+    }
+
     private static boolean ensureOn(Context ctx, String[] why) {
         BluetoothAdapter a = adapter(ctx);
         if (a == null) { why[0] = "no bluetooth"; return false; }
         if (a.isEnabled()) return true;
+        if (btBroken(ctx)) { why[0] = "bluetooth did not start on this device; next try in a few hours"; return false; }
         try {
             if (!a.enable()) { why[0] = "bluetooth could not be switched on"; return false; }
         } catch (SecurityException e) {
@@ -114,7 +131,15 @@ final class BleLost {
         while (!a.isEnabled() && SystemClock.elapsedRealtime() < until) {
             SystemClock.sleep(200);
         }
-        if (!a.isEnabled()) { why[0] = "bluetooth did not come on"; return false; }
+        if (!a.isEnabled()) {
+            // Leave the setting off again: left on, a controller that will not start keeps the
+            // HAL restarting for as long as it is on.
+            try { a.disable(); } catch (Throwable t) { Log.w(TAG, "disable after failed start: " + t.getMessage()); }
+            prefs(ctx).edit().putBoolean(K_BT_OURS, false).putLong(K_BT_FAILED_AT, System.currentTimeMillis()).commit();
+            why[0] = "bluetooth did not come on";
+            return false;
+        }
+        prefs(ctx).edit().remove(K_BT_FAILED_AT).commit();
         Log.i(TAG, "switched bluetooth on");
         return true;
     }
@@ -126,7 +151,8 @@ final class BleLost {
         if (!p.getBoolean(K_BT_OURS, false)) return;
         BluetoothAdapter a = adapter(ctx);
         try {
-            if (a != null && a.isEnabled()) a.disable();
+            // Also when it never came on: the setting is still on and must go back off.
+            if (a != null) a.disable();
             Log.i(TAG, "switched bluetooth back off");
         } catch (Throwable t) {
             Log.w(TAG, "could not switch bluetooth off: " + t.getMessage());
