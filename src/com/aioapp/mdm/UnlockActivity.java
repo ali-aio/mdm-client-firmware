@@ -38,15 +38,19 @@ public class UnlockActivity extends Activity {
     private static final String TAG = "UnlockActivity";
 
     // Palette (self-contained; no theme dependency).
-    private static final int C_BG      = Color.parseColor("#FFFFFF");
-    private static final int C_TITLE   = Color.parseColor("#0F172A");
-    private static final int C_SUB     = Color.parseColor("#64748B");
-    private static final int C_FIELD   = Color.parseColor("#F1F5F9");
-    private static final int C_KEY     = Color.parseColor("#F8FAFC");
-    private static final int C_LINE    = Color.parseColor("#E2E8F0");
-    private static final int C_TINT    = Color.parseColor("#E8EEFF");
-    private static final int C_ACCENT  = Color.parseColor("#2563EB");
-    private static final int C_ERR     = Color.parseColor("#DC2626");
+    // AIO dark: the same night card, coral accent and Poppins (aio-sans) as the lock screen
+    // and the lost screen. Poppins falls back to the default face on an image without it.
+    private static final int C_BG      = Color.parseColor("#1C1828");
+    private static final int C_TITLE   = Color.parseColor("#FFFFFF");
+    private static final int C_SUB     = Color.parseColor("#A9A5BA");
+    private static final int C_FIELD   = Color.parseColor("#2A2538");
+    private static final int C_KEY     = Color.parseColor("#262133");
+    private static final int C_LINE    = Color.parseColor("#3A3449");
+    private static final int C_TINT    = Color.argb(46, 249, 103, 78);
+    private static final int C_ACCENT  = Color.parseColor("#F9674E");
+    private static final int C_ERR     = Color.parseColor("#FF8A80");
+    private static final Typeface FONT = Typeface.create("aio-sans", Typeface.NORMAL);
+    private static final Typeface FONT_MEDIUM = Typeface.create("aio-sans-medium", Typeface.NORMAL);
 
     /** Longest accepted entry: a server-pushed PIN may be up to 8. */
     private static final int MAX_LEN = 8;
@@ -67,7 +71,7 @@ public class UnlockActivity extends Activity {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
                 | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
                 | WindowManager.LayoutParams.FLAG_DIM_BEHIND);
-        getWindow().setDimAmount(0.55f);
+        getWindow().setDimAmount(0.7f);
         getWindow().setBackgroundDrawableResource(android.R.color.transparent);
 
         if (LostMode.isOn(this) || !KioskExit.isEnabled(this)) {
@@ -98,6 +102,7 @@ public class UnlockActivity extends Activity {
         GradientDrawable cardBg = new GradientDrawable();
         cardBg.setColor(C_BG);
         cardBg.setCornerRadius(dp(24));
+        cardBg.setStroke(dp(1), C_LINE);
         card.setBackground(cardBg);
         card.setElevation(dp(8));
         card.setLayoutParams(new LinearLayout.LayoutParams(dp(300),
@@ -109,9 +114,9 @@ public class UnlockActivity extends Activity {
         mark.setLayoutParams(markLp);
         card.addView(mark);
 
-        card.addView(label("Exit kiosk mode", C_TITLE, 20, Typeface.DEFAULT_BOLD, dp(12), 0));
+        card.addView(label("Exit kiosk mode", C_TITLE, 20, FONT_MEDIUM, dp(12), 0));
         card.addView(label("Enter the exit PIN to unlock this device.",
-                C_SUB, 13, Typeface.DEFAULT, dp(4), dp(16)));
+                C_SUB, 13, FONT, dp(4), dp(16)));
 
         // Entry display: one dot per digit, so the code is never on screen to be read off.
         dots = new TextView(this);
@@ -129,6 +134,7 @@ public class UnlockActivity extends Activity {
         status = new TextView(this);
         status.setTextColor(C_ERR);
         status.setTextSize(12);
+        status.setTypeface(FONT);
         status.setGravity(Gravity.CENTER);
         status.setPadding(0, dp(8), 0, 0);
         card.addView(status);
@@ -156,7 +162,7 @@ public class UnlockActivity extends Activity {
         // it is the same serial the dashboard shows.
         String serial = SystemPropertiesProxy.get("ro.serialno", "");
         if (!serial.isEmpty()) {
-            card.addView(label(serial, C_SUB, 10.5f, Typeface.DEFAULT, dp(12), 0));
+            card.addView(label(serial, C_SUB, 10.5f, FONT, dp(12), 0));
         }
 
         outer.addView(card);
@@ -219,7 +225,7 @@ public class UnlockActivity extends Activity {
         b.setText(text);
         b.setTextColor(fg);
         b.setTextSize(15);
-        b.setTypeface(Typeface.DEFAULT_BOLD);
+        b.setTypeface(FONT_MEDIUM);
         b.setGravity(Gravity.CENTER);
         b.setClickable(true);
         b.setFocusable(true);            // so a remote / D-pad can drive the keypad
@@ -331,8 +337,8 @@ public class UnlockActivity extends Activity {
             c.drawRoundRect(new RectF(cx - bw / 2f, bt, cx + bw / 2f, bt + bh),
                     dpf(3f), dpf(3f), paint);
 
-            // Keyhole.
-            paint.setColor(C_TINT);
+            // Keyhole, cut out of the coral body.
+            paint.setColor(C_BG);
             c.drawCircle(cx, bt + bh * 0.42f, dpf(2f), paint);
         }
     }

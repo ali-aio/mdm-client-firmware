@@ -72,6 +72,7 @@ public class MdmService extends Service {
     private int relockIdx = 0;
     private final Handler relockHandler = new Handler(Looper.getMainLooper());
     private final Runnable relockRunnable = this::relockAfterDrop;
+    private final Runnable lockDroppedRunnable = this::onLockTaskDropped;
     private TaskStackListener lockTaskListener;
     // Separate notification for app download/install progress, so it doesn't disturb the
     // persistent foreground-service notification (1001).
@@ -544,9 +545,13 @@ public class MdmService extends Service {
 
         lockTaskListener = new TaskStackListener() {
             @Override public void onLockTaskModeChanged(int mode) {
+                if (mode == ActivityManager.LOCK_TASK_MODE_LOCKED) {
+                    relockHandler.post(() -> RelockCoverActivity.hide(MdmService.this));
+                    return;
+                }
                 if (mode != ActivityManager.LOCK_TASK_MODE_NONE) return;
-                relockHandler.removeCallbacks(relockRunnable);
-                relockHandler.postDelayed(relockRunnable, RELOCK_DELAY_MS);
+                relockHandler.removeCallbacks(lockDroppedRunnable);
+                relockHandler.post(lockDroppedRunnable);
             }
         };
         try {
@@ -654,6 +659,32 @@ public class MdmService extends Service {
     }
 
     /**
+     * Lock task just ended (runs on the main thread, after whatever ended it, such as an
+     * offline exit, has saved its state). On a tablet that should be locked, cover the
+     * launcher at once and re-lock shortly; otherwise leave it be.
+     */
+    private void onLockTaskDropped() {
+        relockHandler.removeCallbacks(relockRunnable);
+        if (!kioskWanted() || relockBudgetSpent()) return;
+        RelockCoverActivity.show(this);
+        relockHandler.postDelayed(relockRunnable, RELOCK_DELAY_MS);
+    }
+
+    /** The saved config wants this tablet locked, and nothing local says otherwise. */
+    private boolean kioskWanted() {
+        if (LostMode.isOn(this) || KioskExit.isSuspended(this)) return false;
+        JSONObject cfg = KioskManager.loadConfig(this);
+        return cfg != null && cfg.optBoolean("kiosk_enabled", false)
+                && !cfg.optString("kiosk_package", "").isEmpty();
+    }
+
+    /** RELOCK_MAX re-locks already inside RELOCK_WINDOW_MS: the app is crash-looping. */
+    private boolean relockBudgetSpent() {
+        long oldest = relockTimes[relockIdx];
+        return oldest != 0 && SystemClock.elapsedRealtime() - oldest < RELOCK_WINDOW_MS;
+    }
+
+    /**
      * Lock task just ended. When the saved config still wants the device locked (and no
      * offline exit or lost mode says otherwise, which enforceKioskLock checks), put the host
      * app back at once. The delay lets a relaunch with CLEAR_TASK, which passes through
@@ -661,13 +692,16 @@ public class MdmService extends Service {
      */
     private void relockAfterDrop() {
         long now = SystemClock.elapsedRealtime();
-        long oldest = relockTimes[relockIdx];
-        if (oldest != 0 && now - oldest < RELOCK_WINDOW_MS) {
+        if (relockBudgetSpent()) {
             Log.w(TAG, "kiosk relock: " + RELOCK_MAX + " drops in " + RELOCK_WINDOW_MS / 1000
                     + " s, leaving it to the poll");
+            RelockCoverActivity.hide(this);
             return;
         }
-        if (KioskManager.isProperlyLocked(this)) return;
+        if (KioskManager.isProperlyLocked(this)) {
+            RelockCoverActivity.hide(this);
+            return;
+        }
         relockTimes[relockIdx] = now;
         relockIdx = (relockIdx + 1) % RELOCK_MAX;
         enforceKioskLock();
@@ -4826,6 +4860,7 @@ public class MdmService extends Service {
             try { unregisterReceiver(screenOnReceiver); } catch (Exception ignored) {}
         }
         relockHandler.removeCallbacks(relockRunnable);
+        relockHandler.removeCallbacks(lockDroppedRunnable);
         if (lockTaskListener != null) {
             try { ActivityTaskManager.getService().unregisterTaskStackListener(lockTaskListener); } catch (Exception ignored) {}
         }

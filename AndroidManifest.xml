@@ -2,8 +2,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     android:sharedUserId="android.uid.system"
     package="com.aioapp.mdm"
-    android:versionCode="95"
-    android:versionName="1.13.5" >
+    android:versionCode="96"
+    android:versionName="1.13.6" >
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -134,6 +134,18 @@
         <!-- Offline kiosk-exit prompt (TOTP). Unused — the nav-bar gesture exits directly via
              MdmService's Settings.Secure-key ContentObserver, no code entry. Kept in the tree,
              not referenced. -->
+        <!-- "Just a moment" over the launcher while a locked tablet's host app is put back
+             (RelockCoverActivity). Its own task, so it never joins the host app's. -->
+        <activity
+            android:name=".RelockCoverActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:launchMode="singleInstance"
+            android:taskAffinity="com.aioapp.mdm.relock"
+            android:showWhenLocked="true"
+            android:theme="@style/RelockCoverTheme" />
+
         <activity
             android:name=".UnlockActivity"
             android:label="Kiosk"
