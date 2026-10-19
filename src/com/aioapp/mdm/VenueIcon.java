@@ -67,6 +67,17 @@ final class VenueIcon {
         }
     }
 
+    /** Version of the icon on disk, 0 when there is none. */
+    static long iconVersion(Context ctx) {
+        long have = prefs(ctx).getLong(K_HAVE, 0);
+        return have > 0 && iconFile(ctx).isFile() ? have : 0;
+    }
+
+    /** Where the cached icon lives (device-protected storage); may not exist. */
+    static File iconFile(Context ctx) {
+        return new File(dp(ctx).getFilesDir(), FILE);
+    }
+
     /** The cached icon, or null. */
     static Bitmap icon(Context ctx) {
         if (prefs(ctx).getLong(K_HAVE, 0) <= 0) return null;
@@ -132,8 +143,13 @@ final class VenueIcon {
         }
     }
 
-    /** Redraws an open lost screen. */
+    /** Tells the welcome screens (lock screen, Home card) and an open lost screen. */
     private static void changed(Context ctx) {
+        try {
+            ctx.getContentResolver().notifyChange(StatusProvider.ROOT_URI, null);
+        } catch (Exception ignored) {
+        }
+        GuestWelcomeWidget.updateAll(ctx);
         if (!LostMode.isOn(ctx)) return;
         try {
             ctx.sendBroadcast(new Intent(LostMode.ACTION_CHANGED).setPackage(ctx.getPackageName()));

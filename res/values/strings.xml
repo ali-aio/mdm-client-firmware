@@ -6,6 +6,12 @@
     <string name="guest_welcome_widget_description">Welcomes guests to the restaurant and opens the menu</string>
     <string name="guest_welcome_title">Welcome to <xliff:g id="restaurant" example="AIO Bistro">%1$s</xliff:g></string>
     <string name="guest_welcome_title_plain">Welcome</string>
+    <!-- The welcome card cycles through these whatever the device language. -->
+    <string name="guest_welcome_title_es" translatable="false">Bienvenido a <xliff:g id="restaurant" example="AIO Bistro">%1$s</xliff:g></string>
+    <string name="guest_welcome_title_fr" translatable="false">Bienvenue chez <xliff:g id="restaurant" example="AIO Bistro">%1$s</xliff:g></string>
+    <string name="guest_welcome_title_de" translatable="false">Willkommen bei <xliff:g id="restaurant" example="AIO Bistro">%1$s</xliff:g></string>
+    <string name="guest_not_deployed">Not deployed to a restaurant</string>
+    <string name="guest_not_deployed_subtitle">Please ask a member of staff</string>
     <string name="guest_welcome_subtitle">Tap to see the menu</string>
     <string name="guest_app_not_found">Nugget app not found</string>
     <string name="guest_welcome_preview_title">Welcome to AIO Bistro</string>

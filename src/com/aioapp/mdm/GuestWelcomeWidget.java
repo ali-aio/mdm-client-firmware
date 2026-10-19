@@ -7,13 +7,17 @@ import android.content.ActivityNotFoundException;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.graphics.Bitmap;
 import android.util.Log;
+import android.view.View;
 import android.widget.RemoteViews;
 import android.widget.Toast;
 
 /**
- * The 4x1 welcome card on a T7's home screen: "Welcome to <restaurant>" over "Tap to see the
- * menu". A tap opens the AIO guest ordering app (the venue's guest_app_package when it names one
+ * The 4x1 welcome card on a T7's home screen: the venue's logo (the storefront badge until
+ * {@link VenueIcon} has it), "Welcome to <restaurant>" cycling through English, Spanish,
+ * French and German, over "Tap to see the menu". With no restaurant assigned it says "Not
+ * deployed to a restaurant" and does nothing when tapped. A tap opens the AIO guest ordering app (the venue's guest_app_package when it names one
  * that is installed, else any installed aio.app.nugget* app, see
  * {@link GuestInfo#guestAppIntent}); with none installed it says so in a toast.
  *
@@ -55,15 +59,31 @@ public class GuestWelcomeWidget extends AppWidgetProvider {
     private static void update(Context ctx, AppWidgetManager awm, int[] ids) {
         GuestInfo g = GuestInfo.load(ctx);
         RemoteViews v = new RemoteViews(ctx.getPackageName(), R.layout.guest_welcome_widget);
-        v.setTextViewText(R.id.guest_welcome_title, g.hasRestaurant()
-                ? ctx.getString(R.string.guest_welcome_title, g.restaurantName)
-                : ctx.getString(R.string.guest_welcome_title_plain));
-        v.setTextViewText(R.id.guest_welcome_subtitle, ctx.getString(R.string.guest_welcome_subtitle));
-        Intent open = new Intent(ACTION_OPEN_GUEST_APP).setClass(ctx, GuestWelcomeWidget.class);
-        PendingIntent pi = PendingIntent.getBroadcast(ctx, 0, open,
-                PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
-        v.setOnClickPendingIntent(R.id.guest_welcome_root, pi);
-        v.setOnClickPendingIntent(R.id.guest_welcome_go, pi);
+        boolean deployed = g.hasRestaurant();
+        Bitmap logo = deployed ? VenueIcon.icon(ctx) : null;
+        if (logo != null) v.setImageViewBitmap(R.id.guest_welcome_logo, logo);
+        v.setViewVisibility(R.id.guest_welcome_logo_box, logo != null ? View.VISIBLE : View.GONE);
+        v.setViewVisibility(R.id.guest_welcome_badge, logo != null ? View.GONE : View.VISIBLE);
+        v.setViewVisibility(R.id.guest_welcome_titles, deployed ? View.VISIBLE : View.GONE);
+        v.setViewVisibility(R.id.guest_welcome_plain, deployed ? View.GONE : View.VISIBLE);
+        v.setViewVisibility(R.id.guest_welcome_go, deployed ? View.VISIBLE : View.GONE);
+        if (deployed) {
+            String name = g.restaurantName;
+            v.setTextViewText(R.id.guest_welcome_title, ctx.getString(R.string.guest_welcome_title, name));
+            v.setTextViewText(R.id.guest_welcome_title_es, ctx.getString(R.string.guest_welcome_title_es, name));
+            v.setTextViewText(R.id.guest_welcome_title_fr, ctx.getString(R.string.guest_welcome_title_fr, name));
+            v.setTextViewText(R.id.guest_welcome_title_de, ctx.getString(R.string.guest_welcome_title_de, name));
+            v.setTextViewText(R.id.guest_welcome_subtitle, ctx.getString(R.string.guest_welcome_subtitle));
+            Intent open = new Intent(ACTION_OPEN_GUEST_APP).setClass(ctx, GuestWelcomeWidget.class);
+            PendingIntent pi = PendingIntent.getBroadcast(ctx, 0, open,
+                    PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+            v.setOnClickPendingIntent(R.id.guest_welcome_root, pi);
+            v.setOnClickPendingIntent(R.id.guest_welcome_go, pi);
+        } else {
+            // Nothing to open on a tablet with no restaurant: no menu, no tap.
+            v.setTextViewText(R.id.guest_welcome_subtitle, ctx.getString(R.string.guest_not_deployed_subtitle));
+            v.setOnClickPendingIntent(R.id.guest_welcome_root, null);
+        }
         awm.updateAppWidget(ids, v);
     }
 

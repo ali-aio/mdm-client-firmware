@@ -6,7 +6,10 @@ import android.content.UriMatcher;
 import android.database.Cursor;
 import android.database.MatrixCursor;
 import android.net.Uri;
+import android.os.ParcelFileDescriptor;
 
+import java.io.File;
+import java.io.FileNotFoundException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -26,9 +29,13 @@ import java.util.List;
  *     name, network, battery) for an empty answer exactly as for a missing provider, and an
  *     empty cursor is not logged as a failure.</li>
  * <li>{@code /welcome}: exactly one row — {@code restaurant_name}, {@code table_label},
- *     {@code wifi_ssid}, each "" when unset. {@code wifi_ssid} is always "" since guest Wi-Fi
- *     went (1.13.3); the column stays so a launcher that asks for it by name still gets a
- *     row.</li>
+ *     {@code wifi_ssid}, each "" when unset, and {@code icon_v}, the version of the venue's
+ *     icon ({@link VenueIcon}), 0 when there is none. {@code wifi_ssid} is always "" since
+ *     guest Wi-Fi went (1.13.3); the column stays so a launcher that asks for it by name
+ *     still gets a row. An empty restaurant_name means the tablet is not deployed to a
+ *     restaurant.</li>
+ * <li>{@code /welcome/icon}: the venue icon itself (PNG, at most 128 px), opened read-only;
+ *     FileNotFoundException when there is none. Re-read it when icon_v changes.</li>
  * </ul>
  *
  * Exported and directBootAware: the launcher and SystemUI query it from the start of a boot,
@@ -40,16 +47,19 @@ public class StatusProvider extends ContentProvider {
     static final Uri ROOT_URI = Uri.parse("content://" + AUTHORITY);
 
     static final String[] GLANCE_COLUMNS = {"icon", "text", "intent", "priority"};
-    static final String[] WELCOME_COLUMNS = {"restaurant_name", "table_label", "wifi_ssid"};
+    static final String[] WELCOME_COLUMNS =
+            {"restaurant_name", "table_label", "wifi_ssid", "icon_v"};
 
     static final int PRIORITY_RESTAURANT = 30;
 
     private static final int GLANCE = 1;
     private static final int WELCOME = 2;
+    private static final int WELCOME_ICON = 3;
     private static final UriMatcher MATCHER = new UriMatcher(UriMatcher.NO_MATCH);
     static {
         MATCHER.addURI(AUTHORITY, "glance", GLANCE);
         MATCHER.addURI(AUTHORITY, "welcome", WELCOME);
+        MATCHER.addURI(AUTHORITY, "welcome/icon", WELCOME_ICON);
     }
 
     @Override
@@ -64,7 +74,7 @@ public class StatusProvider extends ContentProvider {
             case GLANCE:
                 return glance(GuestInfo.load(getContext()), sortOrder);
             case WELCOME:
-                return welcome(GuestInfo.load(getContext()));
+                return welcome(GuestInfo.load(getContext()), VenueIcon.iconVersion(getContext()));
             default:
                 return null;
         }
@@ -103,10 +113,22 @@ public class StatusProvider extends ContentProvider {
         return c;
     }
 
-    private static Cursor welcome(GuestInfo g) {
+    private static Cursor welcome(GuestInfo g, long iconV) {
         MatrixCursor c = new MatrixCursor(WELCOME_COLUMNS, 1);
-        c.addRow(new Object[] {g.restaurantName, g.tableLabel, ""});
+        c.addRow(new Object[] {g.restaurantName, g.tableLabel, "", iconV});
         return c;
+    }
+
+    @Override
+    public ParcelFileDescriptor openFile(Uri uri, String mode) throws FileNotFoundException {
+        if (MATCHER.match(uri) != WELCOME_ICON || !"r".equals(mode)) {
+            throw new FileNotFoundException(uri.toString());
+        }
+        File f = VenueIcon.iconFile(getContext());
+        if (VenueIcon.iconVersion(getContext()) <= 0) {
+            throw new FileNotFoundException("no venue icon");
+        }
+        return ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY);
     }
 
     @Override
@@ -116,6 +138,8 @@ public class StatusProvider extends ContentProvider {
                 return "vnd.android.cursor.dir/vnd.com.aioapp.status.glance";
             case WELCOME:
                 return "vnd.android.cursor.item/vnd.com.aioapp.status.welcome";
+            case WELCOME_ICON:
+                return "image/png";
             default:
                 return null;
         }
