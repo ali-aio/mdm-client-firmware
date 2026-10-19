@@ -442,6 +442,37 @@ public class MdmApiService {
         return (r.code >= 200 && r.code < 300) ? r.body : null;
     }
 
+    /**
+     * GET an image (or any small binary) from a device endpoint with this device's key, for
+     * the lost screen's venue icon (1.13.4). Returns the HTTP status; on 200 the body (at most
+     * 512 KB) is in {@code out}. Never throws: a network error is -1.
+     */
+    public int fetchBytes(String endpoint, java.io.ByteArrayOutputStream out) {
+        HttpURLConnection conn = null;
+        try {
+            conn = (HttpURLConnection) new URL(apiBaseUrl + endpoint).openConnection();
+            conn.setRequestMethod("GET");
+            conn.setRequestProperty("X-API-Key", apiKey);
+            conn.setConnectTimeout(10_000);
+            conn.setReadTimeout(20_000);
+            int code = conn.getResponseCode();
+            if (code != HttpURLConnection.HTTP_OK) return code;
+            try (java.io.InputStream in = conn.getInputStream()) {
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = in.read(buf)) > 0) {
+                    out.write(buf, 0, n);
+                    if (out.size() > 512 * 1024) return 413;
+                }
+            }
+            return code;
+        } catch (Exception e) {
+            return -1;
+        } finally {
+            if (conn != null) conn.disconnect();
+        }
+    }
+
     private static final class GetResult {
         final int code; final String body;
         GetResult(int code, String body) { this.code = code; this.body = body; }

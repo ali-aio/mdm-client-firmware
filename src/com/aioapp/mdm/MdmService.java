@@ -1714,6 +1714,9 @@ public class MdmService extends Service {
         try {
             BleLost.saveListen(MdmService.this, config);
             SelfLock.saveConfig(MdmService.this, config);
+            // The lost screen's venue and icon (1.13.4) ride in self_lock.
+            VenueIcon.note(MdmService.this, config.optJSONObject("self_lock"));
+            syncVenueIcon();
         } catch (Exception e) {
             Log.e(TAG, "lost reporting config error: " + e.getMessage());
         }
@@ -2451,9 +2454,11 @@ public class MdmService extends Service {
                     break;
                 }
                 if (on) {
+                    VenueIcon.note(this, payload);
                     LostMode.turnOn(this, dpm, adminComponent, payload.optString("message", ""),
                             payload.optString("phone", ""), serialNumber,
                             payload.optString("beacon", ""), false);
+                    syncVenueIcon();
                 } else {
                     LostMode.lift(this, dpm, adminComponent);
                 }
@@ -3915,6 +3920,18 @@ public class MdmService extends Service {
         }
         hardwareSerial = hex;
         return hex;
+    }
+
+    /** Fetches the lost screen's venue icon when its version changed (VenueIcon), off the main thread. */
+    private void syncVenueIcon() {
+        final MdmApiService api = apiService;
+        final String serial = getDeviceSerial();
+        if (api == null) return;
+        try {
+            heavyExecutor.execute(() -> VenueIcon.sync(MdmService.this, api, serial));
+        } catch (Exception e) {
+            Log.w(TAG, "venue icon sync not scheduled: " + e.getMessage());
+        }
     }
 
     private String getDeviceSerial() {
