@@ -6,7 +6,6 @@ import android.app.admin.DevicePolicyManager;
 import android.content.ComponentName;
 import android.content.pm.PackageInstaller;
 import android.content.pm.PackageManager;
-import android.database.ContentObserver;
 import android.net.*;
 import android.net.wifi.*;
 import android.os.*;
@@ -51,19 +50,9 @@ public class MdmService extends Service {
     private static final String UPDATES_CHANNEL_ID = "AIO_MDM_UPDATES";
     private static final int NOTIFICATION_ID = 1001;
 
-    // Kiosk-exit gesture: SystemUI's long-press-Back arms an exit by writing this Settings.Secure
-    // key (watched below via ContentObserver); the technician confirms by pressing Power
-    // (screen-off) within the window below.
-    //
-    // Not a broadcast+signature-permission (what this used to be): that grant is computed when
-    // PackageManager rescans the *requesting* package (SystemUI), and this device's OTA path
-    // doesn't rescan SystemUI for a newly-available permission when SystemUI's own APK is
-    // unchanged — worked on a fresh flash, silently never armed after an OTA. A Settings.Secure
-    // write needs no permission grant between the two apps at all.
-    public static final String KIOSK_EXIT_ARM_SETTING = "aioapp_kiosk_exit_arm_at";
-    // Power-press kiosk exit: the long-press-Back arm above needs a SystemUI patch that only
-    // ever landed in the GMS tree, so on QCOM images nothing writes KIOSK_EXIT_ARM_SETTING and
-    // the gesture can't arm at all. This path is pure client: each Power press toggles the
+    // Power-press kiosk exit, the only way out of the lock on the device (the long-press-Back
+    // arm is gone: SystemUI dropped it, and a Power press after it left kiosk with no PIN).
+    // This path is pure client: each Power press toggles the
     // display, and every toggle broadcasts ACTION_SCREEN_ON/OFF, so counting those edges
     // counts the presses. POWER_EXIT_PRESSES within POWER_EXIT_WINDOW_MS opens the PIN prompt
     // — it prompts rather than exiting outright, because a screen toggle is something a user
@@ -73,10 +62,17 @@ public class MdmService extends Service {
     private final long[] powerPressTimes = new long[POWER_EXIT_PRESSES];
     private int powerPressIdx = 0;
     private BroadcastReceiver screenOnReceiver;
-    private static final long KIOSK_EXIT_ARM_WINDOW_MS = 4000;
-    private volatile long kioskExitArmedUntilMs = 0;
-    private BroadcastReceiver screenOffReceiver;
-    private ContentObserver kioskExitArmObserver;
+    // Re-lock the moment lock task drops (the host app crashed or was killed), instead of
+    // leaving the guest on the launcher until the next poll. RELOCK_MAX re-locks inside
+    // RELOCK_WINDOW_MS means the app is crash-looping: stop chasing it and let the poll retry.
+    private static final long RELOCK_DELAY_MS = 1_500L;
+    private static final int RELOCK_MAX = 3;
+    private static final long RELOCK_WINDOW_MS = 60_000L;
+    private final long[] relockTimes = new long[RELOCK_MAX];
+    private int relockIdx = 0;
+    private final Handler relockHandler = new Handler(Looper.getMainLooper());
+    private final Runnable relockRunnable = this::relockAfterDrop;
+    private TaskStackListener lockTaskListener;
     // Separate notification for app download/install progress, so it doesn't disturb the
     // persistent foreground-service notification (1001).
     private static final int INSTALL_NOTIFICATION_ID = 1002;
@@ -528,19 +524,6 @@ public class MdmService extends Service {
         };
         registerReceiver(wifiReceiver, new IntentFilter(WifiManager.NETWORK_STATE_CHANGED_ACTION));
 
-        // Kiosk-exit confirm: a Power press turns the screen off. When an exit was armed
-        // (long-press Back) within the last KIOSK_EXIT_ARM_WINDOW_MS, that Power press is
-        // the confirmation — leave kiosk. Outside the armed window this is a no-op.
-        screenOffReceiver = new BroadcastReceiver() {
-            @Override public void onReceive(Context context, Intent intent) {
-                if (!Intent.ACTION_SCREEN_OFF.equals(intent.getAction())) return;
-                if (SystemClock.elapsedRealtime() > kioskExitArmedUntilMs) return;
-                kioskExitArmedUntilMs = 0;
-                performGestureKioskExit();
-            }
-        };
-        registerReceiver(screenOffReceiver, new IntentFilter(Intent.ACTION_SCREEN_OFF));
-
         // Both edges count as one press: Power with the screen on gives SCREEN_OFF, Power
         // with it off gives SCREEN_ON.
         screenOnReceiver = new BroadcastReceiver() {
@@ -559,20 +542,23 @@ public class MdmService extends Service {
         powerFilter.addAction(Intent.ACTION_SCREEN_OFF);
         registerReceiver(screenOnReceiver, powerFilter);
 
-        // Kiosk-exit arm request from the long-press-Back gesture (SystemUI writes the
-        // Settings.Secure key on every long-press; any write — even the same value — fires
-        // onChange, so no need to inspect the new value here).
-        kioskExitArmObserver = new ContentObserver(new Handler(Looper.getMainLooper())) {
-            @Override public void onChange(boolean selfChange) {
-                armKioskExit();
+        lockTaskListener = new TaskStackListener() {
+            @Override public void onLockTaskModeChanged(int mode) {
+                if (mode != ActivityManager.LOCK_TASK_MODE_NONE) return;
+                relockHandler.removeCallbacks(relockRunnable);
+                relockHandler.postDelayed(relockRunnable, RELOCK_DELAY_MS);
             }
         };
-        getContentResolver().registerContentObserver(
-                Settings.Secure.getUriFor(KIOSK_EXIT_ARM_SETTING), false, kioskExitArmObserver);
+        try {
+            ActivityTaskManager.getService().registerTaskStackListener(lockTaskListener);
+        } catch (Exception e) {
+            Log.e(TAG, "lock-task listener: " + e.getMessage());
+        }
 
         alarmManager = getSystemService(AlarmManager.class);
         pollReceiver = new BroadcastReceiver() {
             @Override public void onReceive(Context context, Intent intent) {
+                enforceKioskLock();
                 if (networkAvailable && !polling) performCheckin();
                 else maybeQueueOffline();
                 scheduleNextPoll();
@@ -667,6 +653,26 @@ public class MdmService extends Service {
         }
     }
 
+    /**
+     * Lock task just ended. When the saved config still wants the device locked (and no
+     * offline exit or lost mode says otherwise, which enforceKioskLock checks), put the host
+     * app back at once. The delay lets a relaunch with CLEAR_TASK, which passes through
+     * LOCK_TASK_MODE_NONE on its way back to LOCKED, settle first.
+     */
+    private void relockAfterDrop() {
+        long now = SystemClock.elapsedRealtime();
+        long oldest = relockTimes[relockIdx];
+        if (oldest != 0 && now - oldest < RELOCK_WINDOW_MS) {
+            Log.w(TAG, "kiosk relock: " + RELOCK_MAX + " drops in " + RELOCK_WINDOW_MS / 1000
+                    + " s, leaving it to the poll");
+            return;
+        }
+        if (KioskManager.isProperlyLocked(this)) return;
+        relockTimes[relockIdx] = now;
+        relockIdx = (relockIdx + 1) % RELOCK_MAX;
+        enforceKioskLock();
+    }
+
     /** True when the device is currently in lock-task (kiosk) mode. */
     private boolean isInKioskLock() {
         try {
@@ -675,17 +681,6 @@ public class MdmService extends Service {
         } catch (Exception e) {
             return false;
         }
-    }
-
-    /** Arm a kiosk exit (long-press Back). Only while actually in kiosk; the technician
-     *  then presses Power within KIOSK_EXIT_ARM_WINDOW_MS to confirm. */
-    private void armKioskExit() {
-        if (!isInKioskLock()) {
-            Log.d(TAG, "kiosk-exit arm ignored: not in kiosk lock");
-            return;
-        }
-        kioskExitArmedUntilMs = SystemClock.elapsedRealtime() + KIOSK_EXIT_ARM_WINDOW_MS;
-        Log.i(TAG, "kiosk-exit armed for " + KIOSK_EXIT_ARM_WINDOW_MS + "ms — press Power to exit");
     }
 
     /**
@@ -715,27 +710,6 @@ public class MdmService extends Service {
             startActivity(i);
         } catch (Exception e) {
             Log.e(TAG, "showUnlockPrompt failed: " + e.getMessage());
-        }
-    }
-
-    /** Confirmed exit (armed Back + Power). Leaves kiosk locally and reports it on the
-     *  next check-in; a check-in is kicked off immediately so the server reflects it fast. */
-    private void performGestureKioskExit() {
-        try {
-            if (!isInKioskLock()) return;
-            // The gesture is the kiosk exit; it never lifts lost mode — only the dashboard does.
-            if (LostMode.isOn(this)) return;
-            KioskManager.suspendLocally(this, dpm, adminComponent);
-            Log.i(TAG, "kiosk exited via Back+Power gesture — pushing immediate telemetry");
-            // Report the exit AT ONCE so the dashboard flips immediately (like the charging
-            // chip), not on the next scheduled poll. Force a keyframe so the frame carrying
-            // offline_exit_at isn't dropped by the delta-skip; push over WS if connected,
-            // and fall back to an HTTP check-in otherwise.
-            forceKeyframe = true;
-            sendTelemetryOverWs();
-            if (networkAvailable && !polling) performCheckin();
-        } catch (Exception e) {
-            Log.e(TAG, "gesture kiosk exit failed: " + e.getMessage());
         }
     }
 
@@ -4848,12 +4822,12 @@ public class MdmService extends Service {
         if (wifiReceiver != null) {
             try { unregisterReceiver(wifiReceiver); } catch (Exception ignored) {}
         }
-        if (screenOffReceiver != null) {
-            try { unregisterReceiver(screenOffReceiver); } catch (Exception ignored) {}
+        if (screenOnReceiver != null) {
             try { unregisterReceiver(screenOnReceiver); } catch (Exception ignored) {}
         }
-        if (kioskExitArmObserver != null) {
-            try { getContentResolver().unregisterContentObserver(kioskExitArmObserver); } catch (Exception ignored) {}
+        relockHandler.removeCallbacks(relockRunnable);
+        if (lockTaskListener != null) {
+            try { ActivityTaskManager.getService().unregisterTaskStackListener(lockTaskListener); } catch (Exception ignored) {}
         }
         super.onDestroy();
     }
