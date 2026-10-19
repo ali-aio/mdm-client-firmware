@@ -10,16 +10,15 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 /**
- * What a guest at the table is shown on a T7: the venue's name, the table the tablet sits
- * on, and the venue's guest Wi-Fi. The MDM sends it as a "guest" object — in the HTTP
- * check-in config, and as its own "guest" WebSocket frame on connect and whenever someone
- * changes it on the dashboard.
+ * What a guest at the table is shown on a T7: the venue's name and the table the tablet
+ * sits on. The MDM sends it as a "guest" object — in the HTTP check-in config, and as its
+ * own "guest" WebSocket frame on connect and whenever someone changes it on the dashboard.
+ * Guest Wi-Fi was removed in 1.13.3 (and from the server on 19 Oct 2026); a stored network
+ * from an older client is dropped the next time the guest info is read or saved.
  *
  * Kept in DEVICE-PROTECTED storage, like the kiosk config: the status provider
  * ({@link StatusProvider}, read by the launcher and the lock screen) and the widgets can then
- * answer from the first moments of a boot, before the user storage is unlocked. The guest
- * Wi-Fi password is stored with it in the clear; it is the password the venue hands every
- * guest, and this app's private storage is only readable by its uid.
+ * answer from the first moments of a boot, before the user storage is unlocked.
  *
  * Every change notifies {@code content://com.aioapp.status} (observers of /glance and
  * /welcome are reached through it) and redraws the two guest widgets.
@@ -28,10 +27,6 @@ final class GuestInfo {
     private static final String TAG = "GuestInfo";
     private static final String PREFS = "mdm_guest";
     private static final String KEY = "guest";
-
-    static final String SEC_WPA = "WPA";
-    static final String SEC_WEP = "WEP";
-    static final String SEC_NOPASS = "nopass";
 
     /**
      * The AIO guest ordering app the welcome card opens when the venue names none
@@ -42,35 +37,18 @@ final class GuestInfo {
 
     final String restaurantName;
     final String tableLabel;
-    final String wifiSsid;
-    final String wifiPassword;
-    /** WPA, WEP or nopass when a network is set; "" when none is. */
-    final String wifiSecurity;
     final String appPackage;
 
-    private GuestInfo(String restaurantName, String tableLabel, String wifiSsid,
-            String wifiPassword, String wifiSecurity, String appPackage) {
+    private GuestInfo(String restaurantName, String tableLabel, String appPackage) {
         this.restaurantName = restaurantName;
         this.tableLabel = tableLabel;
-        this.wifiSsid = wifiSsid;
         this.appPackage = appPackage;
-        if (wifiSsid.isEmpty()) {
-            this.wifiPassword = "";
-            this.wifiSecurity = "";
-        } else if (wifiPassword.isEmpty() || SEC_NOPASS.equalsIgnoreCase(wifiSecurity)) {
-            this.wifiPassword = "";
-            this.wifiSecurity = SEC_NOPASS;
-        } else {
-            this.wifiPassword = wifiPassword;
-            this.wifiSecurity = SEC_WEP.equalsIgnoreCase(wifiSecurity) ? SEC_WEP : SEC_WPA;
-        }
     }
 
     /** Reads the server's "guest" object; a missing key reads as "" (cleared). */
     static GuestInfo fromJson(JSONObject o) {
         if (o == null) o = new JSONObject();
         return new GuestInfo(str(o, "restaurant_name"), str(o, "table_label"),
-                str(o, "wifi_ssid"), str(o, "wifi_password"), str(o, "wifi_security"),
                 str(o, "guest_app_package"));
     }
 
@@ -84,9 +62,6 @@ final class GuestInfo {
         try {
             o.put("restaurant_name", restaurantName);
             o.put("table_label", tableLabel);
-            o.put("wifi_ssid", wifiSsid);
-            o.put("wifi_password", wifiPassword);
-            o.put("wifi_security", wifiSecurity);
             o.put("guest_app_package", appPackage);
         } catch (JSONException ignored) {
             // put() only throws for non-finite numbers
@@ -102,12 +77,8 @@ final class GuestInfo {
         return !tableLabel.isEmpty();
     }
 
-    boolean hasWifi() {
-        return !wifiSsid.isEmpty();
-    }
-
     boolean isEmpty() {
-        return !hasRestaurant() && !hasTable() && !hasWifi();
+        return !hasRestaurant() && !hasTable();
     }
 
     // ── Storage ──────────────────────────────────────────────────────────────
@@ -145,7 +116,7 @@ final class GuestInfo {
             return;
         }
         Log.i(TAG, "guest info: restaurant=" + !next.restaurantName.isEmpty()
-                + " table=" + !next.tableLabel.isEmpty() + " wifi=" + !next.wifiSsid.isEmpty());
+                + " table=" + !next.tableLabel.isEmpty());
         changed(ctx);
     }
 
@@ -187,32 +158,5 @@ final class GuestInfo {
             if (i != null) return i;
         }
         return null;
-    }
-
-    // ── Wi-Fi QR ─────────────────────────────────────────────────────────────
-
-    /**
-     * The Wi-Fi network as a QR payload phones join from their camera:
-     * {@code WIFI:T:<WPA|WEP|nopass>;S:<ssid>;P:<password>;;}, with \ ; , : " in the
-     * name and password escaped by a backslash. Null when no network is set.
-     */
-    String wifiQrPayload() {
-        if (!hasWifi()) return null;
-        StringBuilder b = new StringBuilder("WIFI:T:").append(wifiSecurity)
-                .append(";S:").append(qrEscape(wifiSsid)).append(';');
-        if (!SEC_NOPASS.equals(wifiSecurity)) {
-            b.append("P:").append(qrEscape(wifiPassword)).append(';');
-        }
-        return b.append(';').toString();
-    }
-
-    static String qrEscape(String s) {
-        StringBuilder b = new StringBuilder(s.length() + 8);
-        for (int i = 0; i < s.length(); i++) {
-            char c = s.charAt(i);
-            if (c == '\\' || c == ';' || c == ',' || c == ':' || c == '"') b.append('\\');
-            b.append(c);
-        }
-        return b.toString();
     }
 }

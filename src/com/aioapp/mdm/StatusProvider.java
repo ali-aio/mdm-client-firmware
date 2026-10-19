@@ -14,20 +14,21 @@ import java.util.List;
 /**
  * {@code content://com.aioapp.status} — the guest info ({@link GuestInfo}) for the AIO
  * launcher's glance header and the lock screen's welcome line. Read-only, and readable by
- * anyone: everything in it is what the tablet shows any guest anyway (the Wi-Fi password is
- * deliberately not in it — only {@link GuestWifiActivity} shows that, on a tap).
+ * anyone: everything in it is what the tablet shows any guest anyway.
  *
  * <ul>
  * <li>{@code /glance}: chips — {@code icon} (a name the launcher maps to a glyph),
  *     {@code text}, {@code intent} (an {@code intent:} URI or null) and {@code priority}
  *     (higher first; the launcher asks for {@code "priority DESC"}, and ascending is honoured
  *     too). One row for the restaurant, when set (the table is in the Welcome widget, and
- *     the guest Wi-Fi is not on Home). With
+ *     guest Wi-Fi was removed in 1.13.3). With
  *     nothing set the cursor is empty, not null: the launcher shows its own chips (device
  *     name, network, battery) for an empty answer exactly as for a missing provider, and an
  *     empty cursor is not logged as a failure.</li>
  * <li>{@code /welcome}: exactly one row — {@code restaurant_name}, {@code table_label},
- *     {@code wifi_ssid}, each "" when unset.</li>
+ *     {@code wifi_ssid}, each "" when unset. {@code wifi_ssid} is always "" since guest Wi-Fi
+ *     went (1.13.3); the column stays so a launcher that asks for it by name still gets a
+ *     row.</li>
  * </ul>
  *
  * Exported and directBootAware: the launcher and SystemUI query it from the start of a boot,
@@ -104,7 +105,7 @@ public class StatusProvider extends ContentProvider {
 
     private static Cursor welcome(GuestInfo g) {
         MatrixCursor c = new MatrixCursor(WELCOME_COLUMNS, 1);
-        c.addRow(new Object[] {g.restaurantName, g.tableLabel, g.wifiSsid});
+        c.addRow(new Object[] {g.restaurantName, g.tableLabel, ""});
         return c;
     }
 

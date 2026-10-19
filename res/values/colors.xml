@@ -9,7 +9,6 @@
     <color name="guest_card_edge">#1FFFFFFF</color>
     <color name="guest_text">#FFFFFFFF</color>
     <color name="guest_text_dim">#B3FFFFFF</color>
-    <color name="guest_text_faint">#80FFFFFF</color>
     <color name="guest_soft_white">#24FFFFFF</color>
     <color name="guest_soft_coral">#33F9674E</color>
 </resources>
