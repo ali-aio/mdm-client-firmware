@@ -106,6 +106,14 @@ public final class AdbClient implements Closeable {
 
     public String address() { return address; }
 
+    /**
+     * Changes how long a read may wait from now on. A scan keeps the short default so a
+     * dead host never holds the thread; an install raises it, because a slow device (an
+     * Android TV box on poor Wi-Fi) can take well over the default to open the install
+     * session or acknowledge a chunk of the APK.
+     */
+    public void setIoTimeout(int ms) throws IOException { sock.setSoTimeout(ms); }
+
     /** adbd's CNXN banner, e.g. {@code device::ro.product.name=…;ro.product.model=…;features=…}. */
     public String banner() { return banner; }
 
@@ -172,7 +180,12 @@ public final class AdbClient implements Closeable {
         ByteArrayOutputStream outBuf = new ByteArrayOutputStream();
         // Wait for the stream to open.
         while (remote < 0) {
-            Msg m = read();
+            Msg m;
+            try {
+                m = read();
+            } catch (java.net.SocketTimeoutException e) {
+                throw new IOException("timed out waiting for the device to start " + dest.replaceAll("^(shell|exec):", "").split(" ")[0]);
+            }
             if (m.cmd == A_OKAY && m.arg1 == local) remote = m.arg0;
             else if (m.cmd == A_CLSE && m.arg1 == local) throw new IOException("stream refused: " + dest);
             else if (m.cmd == A_WRTE && m.arg1 == local) { // adbd may write before we see OKAY
@@ -191,7 +204,12 @@ public final class AdbClient implements Closeable {
                 // Flow control: one WRTE in flight. Output can arrive meanwhile.
                 boolean acked = false;
                 while (!acked) {
-                    Msg m = read();
+                    Msg m;
+                    try {
+                        m = read();
+                    } catch (java.net.SocketTimeoutException e) {
+                        throw new IOException("timed out sending to the device after " + sent + " of " + len + " bytes");
+                    }
                     if (m.cmd == A_OKAY && m.arg1 == local) acked = true;
                     else if (m.cmd == A_WRTE && m.arg1 == local) { outBuf.write(m.data); send(A_OKAY, local, remote, null); }
                     else if (m.cmd == A_CLSE && m.arg1 == local) throw new IOException("stream closed by device after " + sent + " of " + len + " bytes: " + outBuf.toString("UTF-8").trim());

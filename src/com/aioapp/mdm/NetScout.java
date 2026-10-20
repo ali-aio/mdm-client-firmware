@@ -79,6 +79,8 @@ public final class NetScout {
     private static volatile NsdManager mdns;
     private static final int ADB_CONNECT_MS = 3000;
     private static final int IO_MS = 8000;
+    /** Reads while the agent is sent and installed (see AdbClient.setIoTimeout). */
+    private static final int INSTALL_IO_MS = 120_000;
     private static final long REFUSED_FOR_MS = 60 * 60 * 1000L;
 
     /** The eight steps, matching the Enroll apps and tools/enroll-adb.sh. */
@@ -362,12 +364,14 @@ public final class NetScout {
         // Which key let us in. It goes back with the result: this is the device whose image
         // we just proved carries that key, and the server keeps it against the serial.
         String usedLabel = "";
+        Keyed used = null;
         try {
             AdbClient.Refused last = null;
             for (Keyed k : keys) {
                 try {
                     c = AdbClient.connect(host, port, k.key, ADB_CONNECT_MS, IO_MS);
                     usedLabel = k.label;
+                    used = k;
                     Log.i(TAG, host + " enrolling with the " + k.label + " key");
                     break;
                 } catch (AdbClient.Refused r) {
@@ -387,10 +391,20 @@ public final class NetScout {
 
             step(out, job, 2);                       // Installing the agent
             download(apkUrl, apk, apkSha);
+            // A slow device on poor Wi-Fi can take far longer than a scan read to open the
+            // install session, take each chunk and verify the APK (20 Oct: an Android TV box
+            // failed "Read timed out" here twice). Wait up to two minutes, and if the send
+            // still stalls, try once more over a fresh connection.
             String ins;
-            try (FileInputStream body = new FileInputStream(apk)) {
-                ins = c.exec("cmd package install -r -S " + apk.length(), body, apk.length());
+            try {
+                ins = install(c, apk);
+            } catch (IOException first) {
+                Log.w(TAG, host + " install attempt 1: " + first.getMessage() + " — retrying on a new connection");
+                c.close();
+                c = AdbClient.connect(host, port, used.key, ADB_CONNECT_MS, IO_MS);
+                ins = install(c, apk);
             }
+            c.setIoTimeout(IO_MS);
             if (!ins.contains("Success")) { enrollDone(out, job, false, "install failed: " + ins.trim()); return; }
 
             step(out, job, 3);                       // Setting Device Owner
@@ -425,6 +439,14 @@ public final class NetScout {
             if (c != null) c.close();
             //noinspection ResultOfMethodCallIgnored
             apk.delete();
+        }
+    }
+
+    /** Sends and installs the agent APK (adb install), with the long install timeout. */
+    private static String install(AdbClient c, File apk) throws IOException {
+        c.setIoTimeout(INSTALL_IO_MS);
+        try (FileInputStream body = new FileInputStream(apk)) {
+            return c.exec("cmd package install -r -S " + apk.length(), body, apk.length());
         }
     }
 
