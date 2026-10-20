@@ -6,6 +6,7 @@ import android.app.admin.DevicePolicyManager;
 import android.content.ComponentName;
 import android.content.pm.PackageInstaller;
 import android.content.pm.PackageManager;
+import android.database.ContentObserver;
 import android.net.*;
 import android.net.wifi.*;
 import android.os.*;
@@ -50,17 +51,14 @@ public class MdmService extends Service {
     private static final String UPDATES_CHANNEL_ID = "AIO_MDM_UPDATES";
     private static final int NOTIFICATION_ID = 1001;
 
-    // Power-press kiosk exit, the only way out of the lock on the device (the long-press-Back
-    // arm is gone: SystemUI dropped it, and a Power press after it left kiosk with no PIN).
-    // This path is pure client: each Power press toggles the
-    // display, and every toggle broadcasts ACTION_SCREEN_ON/OFF, so counting those edges
-    // counts the presses. POWER_EXIT_PRESSES within POWER_EXIT_WINDOW_MS opens the PIN prompt
-    // — it prompts rather than exiting outright, because a screen toggle is something a user
-    // can also produce by accident.
-    private static final int POWER_EXIT_PRESSES = 5;
-    private static final long POWER_EXIT_WINDOW_MS = 10_000L;
-    private final long[] powerPressTimes = new long[POWER_EXIT_PRESSES];
-    private int powerPressIdx = 0;
+    // Staff exit: the firmware (PhoneWindowManager's AioStaffExit) writes the time to this
+    // Settings.Secure key when a finger rests in the top-left corner and Power is pressed while
+    // the tablet is locked; that Power press never reaches the screen. The answer here is only
+    // ever the PIN pad, so a request from anything else that can write secure settings still
+    // needs the PIN.
+    public static final String KIOSK_EXIT_REQUEST_SETTING = "aioapp_kiosk_exit_request";
+    private ContentObserver kioskExitRequestObserver;
+    private StaffPill staffPill;
     private BroadcastReceiver screenOnReceiver;
     // Re-lock the moment lock task drops (the host app crashed or was killed), instead of
     // leaving the guest on the launcher until the next poll. RELOCK_MAX re-locks inside
@@ -529,7 +527,6 @@ public class MdmService extends Service {
         // with it off gives SCREEN_ON.
         screenOnReceiver = new BroadcastReceiver() {
             @Override public void onReceive(Context context, Intent intent) {
-                recordPowerPress();
                 BatteryWear wear = batteryWear;
                 if (wear != null) {
                     wear.onScreen(SystemClock.elapsedRealtime(),
@@ -542,6 +539,16 @@ public class MdmService extends Service {
         powerFilter.addAction(Intent.ACTION_SCREEN_ON);
         powerFilter.addAction(Intent.ACTION_SCREEN_OFF);
         registerReceiver(screenOnReceiver, powerFilter);
+
+        kioskExitRequestObserver = new ContentObserver(new Handler(Looper.getMainLooper())) {
+            @Override public void onChange(boolean selfChange) {
+                onKioskExitRequested();
+            }
+        };
+        getContentResolver().registerContentObserver(
+                Settings.Secure.getUriFor(KIOSK_EXIT_REQUEST_SETTING), false,
+                kioskExitRequestObserver);
+        staffPill = new StaffPill(this, this::backToGuestMode);
 
         lockTaskListener = new TaskStackListener() {
             @Override public void onLockTaskModeChanged(int mode) {
@@ -564,6 +571,7 @@ public class MdmService extends Service {
         pollReceiver = new BroadcastReceiver() {
             @Override public void onReceive(Context context, Intent intent) {
                 enforceKioskLock();
+                updateStaffPill();
                 if (networkAvailable && !polling) performCheckin();
                 else maybeQueueOffline();
                 scheduleNextPoll();
@@ -621,6 +629,7 @@ public class MdmService extends Service {
         }
         if (networkAvailable && !polling) performCheckin();
         enforceKioskLock(); // self-heal: re-assert lock-task if it has dropped
+        updateStaffPill();
         scheduleNextPoll();
         return START_STICKY;
     }
@@ -718,20 +727,46 @@ public class MdmService extends Service {
     }
 
     /**
-     * One display toggle — i.e. one Power press. When POWER_EXIT_PRESSES of them land inside
-     * POWER_EXIT_WINDOW_MS while the device is kiosked, show the PIN prompt.
+     * Staff mode: the PIN was right, so the tablet is out of lock task. The top pill says so
+     * over every app until someone taps "Back to guest mode" or the dashboard locks it again.
+     * It outlasts the server's answer to the exit, which turns the lock off server-side.
      */
-    private void recordPowerPress() {
-        if (!isInKioskLock() || !KioskExit.isEnabled(this)) return;
-        long now = SystemClock.elapsedRealtime();
-        powerPressTimes[powerPressIdx] = now;
-        powerPressIdx = (powerPressIdx + 1) % POWER_EXIT_PRESSES;
-        // The ring holds the last POWER_EXIT_PRESSES presses; the oldest of them being inside
-        // the window means all of them are.
-        long oldest = powerPressTimes[powerPressIdx];
-        if (oldest == 0 || now - oldest > POWER_EXIT_WINDOW_MS) return;
-        java.util.Arrays.fill(powerPressTimes, 0L);  // consume, so the prompt opens once
-        Log.i(TAG, "kiosk-exit: " + POWER_EXIT_PRESSES + " power presses — opening PIN prompt");
+    private void updateStaffPill() {
+        if (staffPill == null) return;
+        if (KioskExit.isStaffMode(this) && !LostMode.isOn(this)) staffPill.show();
+        else staffPill.hide();
+    }
+
+    /** "Back to guest mode" on the staff pill: lock the host app again now. */
+    private void backToGuestMode() {
+        String pkg = KioskExit.staffPackage(this);
+        Log.i(TAG, "staff pill: back to guest mode on " + pkg);
+        KioskExit.setSuspended(this, false);
+        KioskExit.endStaffMode(this);
+        KioskExit.markRelocked(this);
+        staffPill.hide();
+        if (!pkg.isEmpty()) {
+            // Lock the app staff mode left, whatever the server's config says by now (its
+            // answer to the exit turned the lock off); kiosk_relocked_at tells it.
+            JSONObject cfg = KioskManager.loadConfig(this);
+            try {
+                if (cfg == null) cfg = new JSONObject();
+                cfg.put("kiosk_enabled", true);
+                cfg.put("kiosk_package", pkg);
+                KioskManager.applyAndSave(this, dpm, adminComponent, cfg);
+            } catch (JSONException e) {
+                Log.e(TAG, "back to guest mode: " + e.getMessage());
+            }
+        }
+        forceKeyframe = true;
+        sendTelemetryOverWs();
+        if (networkAvailable && !polling) performCheckin();
+    }
+
+    /** The firmware asked for the staff PIN pad (corner + Power while locked). */
+    private void onKioskExitRequested() {
+        if (!isInKioskLock() || LostMode.isOn(this) || !KioskExit.isEnabled(this)) return;
+        Log.i(TAG, "kiosk-exit: corner + Power — opening the staff PIN pad");
         showUnlockPrompt();
     }
 
@@ -1771,6 +1806,13 @@ public class MdmService extends Service {
             String kioskSig = config.optBoolean("kiosk_enabled", false) + "|" + config.optString("kiosk_package", "");
             if (!kioskSig.equals(kioskLastSig)) {
                 KioskManager.applyAndSave(MdmService.this, dpm, adminComponent, config);
+                // The lock is on again server-side (the dashboard re-locked it, or took up a
+                // "Back to guest mode" from here): staff mode is over.
+                if (config.optBoolean("kiosk_enabled", false) && !KioskExit.isSuspended(MdmService.this)) {
+                    KioskExit.endStaffMode(MdmService.this);
+                    KioskExit.clearPendingRelock(MdmService.this);
+                }
+                updateStaffPill();
                 kioskLastSig = kioskSig;
             }
         } catch (Exception e) {
@@ -3545,6 +3587,13 @@ public class MdmService extends Service {
         if (offlineExitAt > 0) {
             extra.put("offline_exit_at", offlineExitAt);
         }
+        // Staff mode (the pill is up) and a "Back to guest mode" on the tablet, which rides
+        // check-ins until the server's config has the lock on again (see applyConfig).
+        extra.put("kiosk_staff_mode", KioskExit.isStaffMode(MdmService.this));
+        long relockedAt = KioskExit.pendingRelockAt(MdmService.this);
+        if (relockedAt > 0) {
+            extra.put("kiosk_relocked_at", relockedAt);
+        }
         // Temperature rides the battery broadcast (EXTRA_TEMPERATURE) but the sensor is a
         // board thermal channel present on every product, kiosks included (same wiring as
         // the T7). So report it whenever we have a reading, regardless of hasBattery().
@@ -3759,7 +3808,7 @@ public class MdmService extends Service {
             // the dashboard showed kiosk on over an unlocked device until then. Gated,
             // the flip itself now forces a frame that carries both. (A frame lost in
             // flight is recovered server-side from latest_extra — processOfflineExit.)
-            "kiosk_suspended", "offline_exit_at",
+            "kiosk_suspended", "offline_exit_at", "kiosk_staff_mode", "kiosk_relocked_at",
             // A flap starting or settling is one frame; the toggles inside it are none.
             "charger_flapping",
             // A new charge climb (BatteryWear), at most one per charge.
@@ -4859,6 +4908,10 @@ public class MdmService extends Service {
         if (screenOnReceiver != null) {
             try { unregisterReceiver(screenOnReceiver); } catch (Exception ignored) {}
         }
+        if (kioskExitRequestObserver != null) {
+            try { getContentResolver().unregisterContentObserver(kioskExitRequestObserver); } catch (Exception ignored) {}
+        }
+        if (staffPill != null) staffPill.hide();
         relockHandler.removeCallbacks(relockRunnable);
         relockHandler.removeCallbacks(lockDroppedRunnable);
         if (lockTaskListener != null) {

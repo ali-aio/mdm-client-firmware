@@ -168,7 +168,8 @@ public class KioskManager {
     public static void suspendLocally(Context ctx, DevicePolicyManager dpm, ComponentName admin) {
         stopSystemLockTask();
         clearLockTaskAllowlist(dpm, admin);
-        KioskExit.markExited(ctx);
+        JSONObject cfg = loadConfig(ctx);
+        KioskExit.markExited(ctx, cfg == null ? "" : cfg.optString("kiosk_package", ""));
         try {
             Intent home = new Intent(Intent.ACTION_MAIN);
             home.addCategory(Intent.CATEGORY_HOME);

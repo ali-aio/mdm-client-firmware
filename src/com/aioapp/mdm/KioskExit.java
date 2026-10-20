@@ -30,6 +30,8 @@ public final class KioskExit {
     private static final String K_LOCKOUT   = "lockout_until_ms";
     private static final String K_EVENT_AT  = "exit_event_at"; // epoch secs, 0 = none pending
     private static final String K_PIN       = "pin";        // static exit PIN (server-pushed)
+    private static final String K_STAFF_PKG = "staff_pkg";  // host app staff mode left, "" = none
+    private static final String K_RELOCK_AT = "relock_event_at"; // epoch secs, 0 = none pending
 
     /**
      * Static exit PIN used until the server pushes one in offline_exit.pin; this PIN is what
@@ -104,11 +106,28 @@ public final class KioskExit {
         return false;
     }
 
-    /** Record that the device was exited from kiosk offline (queues a check-in event). */
-    public static void markExited(Context ctx) {
+    /**
+     * Record that the device was exited from kiosk offline (queues a check-in event) and enter
+     * staff mode, remembering the host app it was locked to so "Back to guest mode" can lock
+     * it again even after the server has turned the lock off in answer to the exit.
+     */
+    public static void markExited(Context ctx, String hostPackage) {
         setSuspended(ctx, true);
-        prefs(ctx).edit().putLong(K_EVENT_AT, System.currentTimeMillis() / 1000L).apply();
+        prefs(ctx).edit().putLong(K_EVENT_AT, System.currentTimeMillis() / 1000L)
+                .putString(K_STAFF_PKG, hostPackage == null ? "" : hostPackage).apply();
     }
+
+    /** The host app staff mode left, or "" when the tablet is not in staff mode. */
+    public static String staffPackage(Context ctx) { return prefs(ctx).getString(K_STAFF_PKG, ""); }
+    public static boolean isStaffMode(Context ctx) { return !staffPackage(ctx).isEmpty(); }
+    public static void endStaffMode(Context ctx) { prefs(ctx).edit().putString(K_STAFF_PKG, "").apply(); }
+
+    /** Staff went back to guest mode on the tablet (queues a check-in event). */
+    public static void markRelocked(Context ctx) {
+        prefs(ctx).edit().putLong(K_RELOCK_AT, System.currentTimeMillis() / 1000L).apply();
+    }
+    public static long pendingRelockAt(Context ctx) { return prefs(ctx).getLong(K_RELOCK_AT, 0); }
+    public static void clearPendingRelock(Context ctx) { prefs(ctx).edit().putLong(K_RELOCK_AT, 0).apply(); }
 
     /** Epoch seconds of a pending offline-exit event, or 0 if none. */
     public static long pendingEventAt(Context ctx) { return prefs(ctx).getLong(K_EVENT_AT, 0); }
