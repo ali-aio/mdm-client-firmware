@@ -7,6 +7,8 @@ import android.graphics.Color;
 import android.graphics.PixelFormat;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
 import android.util.TypedValue;
 import android.view.Gravity;
@@ -33,6 +35,8 @@ final class StaffPill {
 
     private final Context ctx;
     private final Runnable onBack;
+    /** Window and animator work happens here: config can arrive on a network thread. */
+    private final Handler main = new Handler(Looper.getMainLooper());
     private View view;
     private ObjectAnimator pulse;
 
@@ -41,7 +45,12 @@ final class StaffPill {
         this.onBack = onBack;
     }
 
+    /** Puts the pill up. Safe from any thread. */
     void show() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            main.post(this::show);
+            return;
+        }
         if (view != null) return;
         View v = build();
         WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
@@ -65,7 +74,12 @@ final class StaffPill {
         }
     }
 
+    /** Takes the pill down. Safe from any thread. */
     void hide() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            main.post(this::hide);
+            return;
+        }
         if (view == null) return;
         if (pulse != null) pulse.cancel();
         try {
