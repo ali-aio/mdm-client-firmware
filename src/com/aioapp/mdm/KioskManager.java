@@ -104,7 +104,10 @@ public class KioskManager {
                 //      - not running                             -> launch fresh -> LOCKED
                 //      - running (unlocked) or stuck PINNED       -> relaunch with CLEAR_TASK
                 //        so the activity is recreated and actually enters LOCKED
-                if (isProperlyLocked(ctx) && pkg.equals(foregroundPackage(ctx))) {
+                String fg = foregroundPackage(ctx);
+                // The client's own screens (staff PIN pad, re-lock cover) sit over the host app
+                // inside the same lock; relaunching the app here would close them.
+                if (isProperlyLocked(ctx) && (pkg.equals(fg) || ctx.getPackageName().equals(fg))) {
                     Log.i(TAG, "Kiosk already LOCKED on " + pkg);
                 } else {
                     if (lockState(ctx) == ActivityManager.LOCK_TASK_MODE_PINNED) {

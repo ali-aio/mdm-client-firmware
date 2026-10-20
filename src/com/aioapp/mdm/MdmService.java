@@ -658,7 +658,9 @@ public class MdmService extends Service {
             // must be treated as unlocked and re-asserted into a real device-owner lock.
             boolean locked = KioskManager.isProperlyLocked(this);
             String fg = KioskManager.foregroundPackage(this);
-            if (!locked || !pkg.equals(fg)) {
+            // The client's own screens (the staff PIN pad, the re-lock cover) are allowed
+            // over the host app in lock task; one of them in front is not a dropped lock.
+            if (!locked || !(pkg.equals(fg) || getPackageName().equals(fg))) {
                 Log.w(TAG, "kiosk watchdog: reasserting lock (state=" + KioskManager.lockState(this) + " fg=" + fg + " want=" + pkg + ")");
                 KioskManager.apply(this, dpm, adminComponent, cfg);
             }
