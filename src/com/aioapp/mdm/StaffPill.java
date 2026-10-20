@@ -133,11 +133,17 @@ final class StaffPill {
         return lp;
     }
 
-    /** The status bar as drawn now (the framework's status_bar_height dimen overstates it). */
+    /**
+     * The status bar's height, whether or not it is showing right now: staff mode starts from
+     * the PIN pad, which hides the system bars, and the visible inset was then 0 and put the
+     * pill on top of the status bar. (The framework's status_bar_height dimen overstates it.)
+     */
     private int statusBarHeight() {
         try {
-            return ctx.getSystemService(WindowManager.class).getCurrentWindowMetrics()
-                    .getWindowInsets().getInsets(android.view.WindowInsets.Type.statusBars()).top;
+            int h = ctx.getSystemService(WindowManager.class).getCurrentWindowMetrics()
+                    .getWindowInsets()
+                    .getInsetsIgnoringVisibility(android.view.WindowInsets.Type.statusBars()).top;
+            return h > 0 ? h : dp(24);
         } catch (RuntimeException e) {
             return dp(24);
         }
