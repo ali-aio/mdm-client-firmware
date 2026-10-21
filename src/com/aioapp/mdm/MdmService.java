@@ -609,6 +609,8 @@ public class MdmService extends Service {
         startCommandPoller();
         // Mic gain enforcement target (debug prop) resets on boot — restore the saved one.
         executor.submit(() -> MicGain.applySavedTarget(MdmService.this));
+        // A locked brightness is held again (restriction, auto off, observer).
+        ScreenBrightness.restore(this);
     }
 
     @Override
@@ -1799,6 +1801,13 @@ public class MdmService extends Service {
             if (product.hasWlc() && (wlcLastApplied == null || wlcLastApplied.booleanValue() != wlc)) {
                 if (setWlcCharging(wlc)) wlcLastApplied = Boolean.valueOf(wlc);
             }
+        }
+        // Screen brightness from the dashboard (1.14.0): applied when the value changes, held
+        // while locked. A config without the keys (older server) leaves it alone.
+        try {
+            ScreenBrightness.saveConfig(MdmService.this, config);
+        } catch (Exception e) {
+            Log.e(TAG, "brightness config error: " + e.getMessage());
         }
         // Apply kiosk policy only when it actually changed. Config rides every check-in
         // and telemetry frame (many per second when the charger flaps), and re-applying an
@@ -3573,6 +3582,7 @@ public class MdmService extends Service {
             extra.put("wlc_charging", readWlcCharging()); // reported so the dashboard shows real state
         }
         extra.put("ram_usage_mb", getRamUsageMb());
+        ScreenBrightness.report(this, extra);
         extra.put("timezone", java.util.TimeZone.getDefault().getID());
         // Mic capture gain (TX_DEC0..7 Volume): 102 = trinket mic fix present, 84 = codec
         // default. Admin-only on the dashboard. Omitted when the device has no mixer-paths
