@@ -16,12 +16,17 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
+import java.net.Inet4Address;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.InterfaceAddress;
+import java.net.NetworkInterface;
 import java.net.Socket;
 import java.net.URL;
 import java.security.MessageDigest;
 import java.security.PrivateKey;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -43,7 +48,7 @@ import java.util.Set;
  *
  * <p>Frames in (handled in MdmService.handleWsMessage):
  * <ul>
- *   <li>{@code net_scan {session, key_pem, host?, ttl_s?}} — sweep the /24 (or re-probe one
+ *   <li>{@code net_scan {session, key_pem, host?, ttl_s?}} — sweep the Wi-Fi network, up to a /22 (or re-probe one
  *       host), report each device that answers the key.</li>
  *   <li>{@code net_scan_cancel {session}} — stop an in-flight sweep.</li>
  *   <li>{@code net_enroll {job, host, port?, serial, class, token, apk_url, apk_sha256?,
@@ -65,6 +70,7 @@ public final class NetScout {
 
     private static final int ADB_PORT = 5555;
     private static final int PARALLEL = 16;
+    private static final int MIN_PREFIX = 22;          // widest network swept: a /22, 1022 hosts
     // 400ms is enough for a closed port to RST, and enough for an awake device to
     // answer — but a device whose Wi-Fi radio is in power-save takes longer than that
     // to get its first SYN-ACK out, and read as "closed". That silently lost real
@@ -152,7 +158,7 @@ public final class NetScout {
     // ── scan ────────────────────────────────────────────────────────────────────────
 
     /**
-     * Runs a whole /24 sweep (or, with {@code host} set, a single-host re-probe) and reports
+     * Runs a whole network sweep (or, with {@code host} set, a single-host re-probe) and reports
      * every device that accepts the key as a {@code net_sighting}, then {@code net_scan_done}.
      * Blocking; call off the main thread.
      */
@@ -189,10 +195,9 @@ public final class NetScout {
 
         List<String> hosts;
         if (only.isEmpty()) {
-            // Two ways of looking, because neither finds everything. The /24 sweep only
-            // covers this device's own third octet and skips .0 and .255 — a venue on
-            // more than one AP subnet (or a flat /16, like the lab) hides devices from
-            // it. mDNS is multicast on the local link and answers across those subnets,
+            // Two ways of looking, because neither finds everything. The sweep covers
+            // this device's own Wi-Fi network up to a /22 — a venue on more than one AP
+            // subnet, or a network wider than a /22, still hides devices from it. mDNS is multicast on the local link and answers across those subnets,
             // which is how the AIO Enroll desktop app finds devices without sweeping at
             // all (`adb mdns services`). Union of the two, de-duplicated, sweep order
             // first so the common case is unchanged.
@@ -201,20 +206,22 @@ public final class NetScout {
             int extra = 0;
             for (String h : viaMdns) if (all.add(h)) extra++;
             if (!viaMdns.isEmpty()) {
-                Log.i(TAG, "mDNS saw " + viaMdns.size() + " adb host(s), " + extra + " outside this /24");
+                Log.i(TAG, "mDNS saw " + viaMdns.size() + " adb host(s), " + extra + " outside the sweep");
             }
             hosts = new ArrayList<>(all);
         } else {
             hosts = new ArrayList<>(List.of(only));
         }
-        if (hosts.isEmpty()) { done(out, session, 0, 0, 0, "no Wi-Fi /24"); return; }
+        if (hosts.isEmpty()) { done(out, session, 0, 0, 0, "no Wi-Fi network"); return; }
 
         final String self = localIp(ctx);
         final long now = System.currentTimeMillis();
         final List<String> open = new CopyOnWriteArrayList<>();
         final List<String> quiet = new CopyOnWriteArrayList<>();   // did not answer in time
         final int firstMs = only.isEmpty() ? PORT_PROBE_MS : PORT_PROBE_SLOW_MS;
-        ExecutorService pool = Executors.newFixedThreadPool(PARALLEL);
+        // 16 for a /24, 64 for a /22: a wider net takes the same wall time, not four times it.
+        final int parallel = Math.max(PARALLEL, Math.min(64, hosts.size() / 16));
+        ExecutorService pool = Executors.newFixedThreadPool(parallel);
         for (final String host : hosts) {
             if (host.equals(self)) continue;
             if (only.isEmpty()) {                       // re-probe ignores the refused cache
@@ -232,7 +239,7 @@ public final class NetScout {
         // misses the first budget and answers this one, which is the difference between
         // finding a device and reporting an empty venue.
         if (only.isEmpty() && !quiet.isEmpty() && !cancelled.containsKey(session)) {
-            ExecutorService slow = Executors.newFixedThreadPool(PARALLEL);
+            ExecutorService slow = Executors.newFixedThreadPool(parallel);
             for (final String host : quiet) {
                 slow.execute(() -> { if (portOpen(host, ADB_PORT, PORT_PROBE_SLOW_MS)) open.add(host); });
             }
@@ -556,7 +563,6 @@ public final class NetScout {
         }
     }
 
-    /** Every address in this device's Wi-Fi /24 (the common case; wider masks are not swept). */
     /**
      * Addresses advertising adb over mDNS, the same services `adb mdns services` lists:
      * {@code _adb._tcp} (adbd with TCP enabled, which is what our images do) and the
@@ -617,15 +623,50 @@ public final class NetScout {
         return host[0];
     }
 
+    /**
+     * Every host on the scout's own Wi-Fi network, from the interface's real prefix rather
+     * than an assumed /24: venues (and the lab) hand out /22s, and a kiosk at 10.32.1.x was
+     * invisible to a scout at 10.32.0.x. Capped at a /22 (1022 hosts) so a flat /16 is
+     * swept around the scout, not whole.
+     */
     private static List<String> subnetHosts(Context ctx) {
         List<String> out = new ArrayList<>();
         String ip = localIp(ctx);
         if (ip == null) return out;
-        int dot = ip.lastIndexOf('.');
-        if (dot < 0) return out;
-        String base = ip.substring(0, dot + 1);
-        for (int i = 1; i <= 254; i++) out.add(base + i);
+        int addr;
+        try {
+            byte[] b = InetAddress.getByName(ip).getAddress();
+            addr = ((b[0] & 0xff) << 24) | ((b[1] & 0xff) << 16) | ((b[2] & 0xff) << 8) | (b[3] & 0xff);
+        } catch (Exception e) {
+            return out;
+        }
+        int prefix = Math.max(prefixLength(ip), MIN_PREFIX);
+        if (prefix > 30) return out;
+        int mask = (int) (0xffffffffL << (32 - prefix));
+        int net = addr & mask;
+        int size = 1 << (32 - prefix);
+        for (int i = 1; i < size - 1; i++) {
+            int h = net + i;
+            out.add(String.format(Locale.US, "%d.%d.%d.%d", (h >>> 24) & 0xff, (h >>> 16) & 0xff, (h >>> 8) & 0xff, h & 0xff));
+        }
         return out;
+    }
+
+    /** The prefix length of the interface holding {@code ip}; 24 when it cannot be read. */
+    private static int prefixLength(String ip) {
+        try {
+            for (NetworkInterface ni : Collections.list(NetworkInterface.getNetworkInterfaces())) {
+                for (InterfaceAddress ia : ni.getInterfaceAddresses()) {
+                    InetAddress a = ia.getAddress();
+                    if (a instanceof Inet4Address && ip.equals(a.getHostAddress())) {
+                        return ia.getNetworkPrefixLength();
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "prefix: " + e.getMessage());
+        }
+        return 24;
     }
 
     private static String localIp(Context ctx) {
