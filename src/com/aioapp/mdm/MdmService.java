@@ -2571,6 +2571,25 @@ public class MdmService extends Service {
                 break;
             }
             case "wifi_config": {
+                if ("connect".equals(payload.optString("action", ""))) {
+                    // Switch networks, reversibly (WifiConfig.connect, 1.18.0): up to 90 s on
+                    // its own thread; the result is acked once the device is back online.
+                    final String cid = cmdId, sn = serialNumber, target = payload.optString("ssid", "");
+                    heavyExecutor.submit(() -> {
+                        try {
+                            JSONObject res = WifiConfig.connect(MdmService.this, target, () -> {
+                                java.io.ByteArrayOutputStream b = new java.io.ByteArrayOutputStream();
+                                return apiService.fetchBytes("/health", b) == 200;
+                            });
+                            forceKeyframe = true;
+                            reportTerminal(cid, sn, res.optBoolean("ok", false) ? "completed" : "failed", res.toString());
+                            sendTelemetryOverWs();
+                        } catch (Exception e) {
+                            Log.e(TAG, "wifi switch: " + e.getMessage());
+                        }
+                    });
+                    break;
+                }
                 // Add/update or forget a saved Wi-Fi network (WifiConfig). Never touches the
                 // network the device is on, so a venue can add its new network first.
                 String err = WifiConfig.apply(this, payload);
@@ -3523,6 +3542,8 @@ public class MdmService extends Service {
         extra.put("http_commands", true);
         // Remote control takes keys with modifiers, text, scroll and the clipboard (1.16.0).
         extra.put("remote_input", RemoteInput.LEVEL);
+        // wifi_config "connect" switches networks and goes back if the new one fails (1.18.0).
+        extra.put("wifi_connect", true);
         // This client runs interactive shell sessions (shell_open / shell_input / shell_close).
         extra.put("shell_session", true);
         // This client runs the "wipe" command (factory reset). A flag, not extra.capabilities:

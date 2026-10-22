@@ -223,6 +223,70 @@ final class WifiConfig {
         }
     }
 
+    static final long SWITCH_MS = 90_000L;
+
+    /**
+     * Switch to a saved network, reversibly (1.18.0; device page Wi-Fi card, W1, 22 Oct
+     * 2026). Joins {@code ssid}, and keeps it only if the MDM answers from there within
+     * SWITCH_MS ({@code reach}); otherwise rejoins the network it was on. Blocks up to
+     * SWITCH_MS plus the way back, so run it off the command thread. Returns the command
+     * result: {ok, after_s} or {error: "switch_failed", reason, reverted_to}.
+     */
+    static JSONObject connect(Context ctx, String ssid, java.util.concurrent.Callable<Boolean> reach) throws JSONException {
+        WifiManager wm = wifi(ctx);
+        if (wm == null) return new JSONObject().put("error", "no wifi");
+        WifiConfiguration target = find(wm, ssid);
+        if (target == null) return new JSONObject().put("error", "switch_failed").put("reason", "unknown_network");
+        String prevSsid = connectedSsid(wm);
+        if (ssid.equals(prevSsid)) return new JSONObject().put("ok", true).put("after_s", 0);
+        int prevId = -1;
+        try { WifiInfo info = wm.getConnectionInfo(); if (info != null) prevId = info.getNetworkId(); } catch (Exception ignored) {}
+        final boolean[] authFailed = {false};
+        android.content.BroadcastReceiver rx = new android.content.BroadcastReceiver() {
+            @Override public void onReceive(Context c, android.content.Intent i) {
+                if (i.getIntExtra(WifiManager.EXTRA_SUPPLICANT_ERROR, -1) == WifiManager.ERROR_AUTHENTICATING) authFailed[0] = true;
+            }
+        };
+        ctx.getApplicationContext().registerReceiver(rx, new android.content.IntentFilter(WifiManager.SUPPLICANT_STATE_CHANGED_ACTION));
+        boolean seen = inRange(wm, ssid), joined = false;
+        long start = SystemClock.elapsedRealtime();
+        try {
+            Log.i(TAG, "switching " + prevSsid + " -> " + ssid);
+            join(wm, target.networkId);
+            while (SystemClock.elapsedRealtime() - start < SWITCH_MS && !authFailed[0]) {
+                try { Thread.sleep(1000); } catch (InterruptedException e) { break; }
+                if (ssid.equals(connectedSsid(wm))) {
+                    joined = true;
+                    boolean ok = false;
+                    try { ok = Boolean.TRUE.equals(reach.call()); } catch (Exception ignored) {}
+                    if (ok) {
+                        Log.i(TAG, "on " + ssid + " and the MDM answers — keeping it");
+                        return new JSONObject().put("ok", true).put("ssid", ssid)
+                                .put("after_s", (SystemClock.elapsedRealtime() - start) / 1000);
+                    }
+                }
+            }
+        } finally {
+            try { ctx.getApplicationContext().unregisterReceiver(rx); } catch (Exception ignored) {}
+        }
+        String reason = authFailed[0] ? "auth_failed" : joined ? "no_internet" : (!seen && !inRange(wm, ssid)) ? "not_in_range" : "timeout";
+        Log.w(TAG, "switch to " + ssid + " failed (" + reason + ") — back to " + prevSsid);
+        if (prevId != -1) join(wm, prevId);
+        return new JSONObject().put("error", "switch_failed").put("reason", reason).put("ssid", ssid)
+                .put("reverted_to", prevSsid == null ? "" : prevSsid);
+    }
+
+    /** Joins a saved network: the system's connect (the settings app's path), else enableNetwork. */
+    private static void join(WifiManager wm, int netId) {
+        try {
+            wm.connect(netId, null);
+        } catch (Throwable t) {
+            Log.w(TAG, "connect(" + netId + "): " + t + " — enableNetwork instead");
+            wm.enableNetwork(netId, true);
+            wm.reconnect();
+        }
+    }
+
     /** extra.wifi_networks: saved networks, no passwords. Null when Wi-Fi can't be read. */
     static JSONArray networks(Context ctx) {
         WifiManager wm = wifi(ctx);
