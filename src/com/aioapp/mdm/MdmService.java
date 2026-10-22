@@ -2155,6 +2155,19 @@ public class MdmService extends Service {
                     }
                 });
                 break;
+            case "clipboard_get":
+                // The remote page's "Copy from device" (client 1.16.0, RemoteInput).
+                executor.submit(() -> {
+                    try {
+                        JSONObject out = new JSONObject();
+                        out.put("type", "remote_clipboard");
+                        out.put("text", RemoteInput.clipboardText(MdmService.this));
+                        wsClient.send(out.toString());
+                    } catch (Exception e) {
+                        Log.e(TAG, "clipboard_get error: " + e.getMessage());
+                    }
+                });
+                break;
             case "start_capture":
                 heavyExecutor.submit(() -> {
                     // Clamp server-supplied capture params so an out-of-range value can't peg CPU
@@ -3008,54 +3021,7 @@ public class MdmService extends Service {
     }
 
     private void handleInputEvent(JSONObject msg) throws Exception {
-        float normX = (float) msg.optDouble("x", 0.5);
-        float normY = (float) msg.optDouble("y", 0.5);
-        String action = msg.optString("action", "touch");
-        String event = msg.optString("event", "down");
-
-        android.hardware.input.InputManager im =
-                (android.hardware.input.InputManager) getSystemService(Context.INPUT_SERVICE);
-
-        if ("touch".equals(action)) {
-            android.view.Display display = null;
-            if (android.os.Build.VERSION.SDK_INT >= 30) {
-                display = getDisplay();
-            }
-            int displayW = 1080, displayH = 1920;
-            if (display != null) {
-                android.graphics.Point size = new android.graphics.Point();
-                display.getRealSize(size);
-                displayW = size.x;
-                displayH = size.y;
-            }
-            float x = normX * displayW;
-            float y = normY * displayH;
-
-            int actionCode;
-            switch (event) {
-                case "down":  actionCode = android.view.MotionEvent.ACTION_DOWN; break;
-                case "move":  actionCode = android.view.MotionEvent.ACTION_MOVE; break;
-                case "up":    actionCode = android.view.MotionEvent.ACTION_UP; break;
-                default:      actionCode = android.view.MotionEvent.ACTION_DOWN; break;
-            }
-
-            long now = android.os.SystemClock.uptimeMillis();
-            android.view.MotionEvent me = android.view.MotionEvent.obtain(
-                    now, now, actionCode, x, y, 0);
-            im.injectInputEvent(me, android.hardware.input.InputManager.INJECT_INPUT_EVENT_MODE_ASYNC);
-            me.recycle();
-
-        } else if ("key".equals(action)) {
-            int keycode = msg.optInt("keycode", 0);
-            int keyAction = "down".equals(event)
-                    ? android.view.KeyEvent.ACTION_DOWN
-                    : android.view.KeyEvent.ACTION_UP;
-
-            long now = android.os.SystemClock.uptimeMillis();
-            android.view.KeyEvent ke = new android.view.KeyEvent(now, now, keyAction, keycode, 0);
-            im.injectInputEvent(ke, android.hardware.input.InputManager.INJECT_INPUT_EVENT_MODE_ASYNC);
-            ke.recycle();
-        }
+        RemoteInput.handle(this, msg);
     }
 
     private void processWsLogcatRequest(JSONObject req) throws Exception {
@@ -3546,6 +3512,8 @@ public class MdmService extends Service {
         // to decide whether to use the response as a command channel for a device with no
         // socket — the gate follows what the device can do, not a server-wide flag.
         extra.put("http_commands", true);
+        // Remote control takes keys with modifiers, text, scroll and the clipboard (1.16.0).
+        extra.put("remote_input", RemoteInput.LEVEL);
         // This client runs interactive shell sessions (shell_open / shell_input / shell_close).
         extra.put("shell_session", true);
         // This client runs the "wipe" command (factory reset). A flag, not extra.capabilities:
