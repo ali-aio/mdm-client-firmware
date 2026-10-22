@@ -78,8 +78,12 @@ public final class NetScout {
     // So the sweep keeps the short budget for its first pass (254 hosts have to stay
     // fast) and gives every non-responder a second, patient one; a scan aimed at a
     // single host is patient from the start, because one host costs nothing.
+    // The patient budget has to outlast ARP, not just the SYN-ACK: a host the scout has
+    // never talked to needs the kernel's three ARP tries (752 ms apart on the T7) and a
+    // dozing radio answers late in that window. 1500 ms missed a Mega kiosk that took
+    // over 2 s to answer its first ARP and 20 ms once resolved.
     private static final int PORT_PROBE_MS = 400;
-    private static final int PORT_PROBE_SLOW_MS = 1500;
+    private static final int PORT_PROBE_SLOW_MS = 3500;
     private static final long MDNS_LISTEN_MS = 2500;    // long enough for a link to answer
     private static final long MDNS_RESOLVE_MS = 1200;
     private static volatile NsdManager mdns;
@@ -244,7 +248,7 @@ public final class NetScout {
                 slow.execute(() -> { if (portOpen(host, ADB_PORT, PORT_PROBE_SLOW_MS)) open.add(host); });
             }
             slow.shutdown();
-            try { slow.awaitTermination(60, TimeUnit.SECONDS); } catch (InterruptedException ignored) {}
+            try { slow.awaitTermination(120, TimeUnit.SECONDS); } catch (InterruptedException ignored) {}
         }
 
         int accepted = 0, refused = 0;
