@@ -260,7 +260,7 @@ public class MdmService extends Service {
     private static final long STORAGE_CACHE_MS = 120_000;
 
     private JSONObject cachedWifiExtra = null;
-    private long wifiLastMs = 0;
+    private volatile long wifiLastMs = 0;
     // One minute (1.17.0): the device page's Network tab draws the signal, and a 5-minute
     // cache made it a staircase. Reading the connection info is cheap.
     private static final long WIFI_CACHE_MS = 60_000;
@@ -531,6 +531,9 @@ public class MdmService extends Service {
             @Override public void onReceive(Context context, Intent intent) {
                 NetworkInfo ni = intent.getParcelableExtra(WifiManager.EXTRA_NETWORK_INFO);
                 boolean connected = ni != null && ni.isConnected();
+                // The network changed: the next report reads it fresh rather than from the
+                // one-minute cache, so the dashboard never shows the old network (1.18.1).
+                wifiLastMs = 0;
                 if (wifiWasConnected && !connected) {
                     recordWifiDisconnect();
                 }
