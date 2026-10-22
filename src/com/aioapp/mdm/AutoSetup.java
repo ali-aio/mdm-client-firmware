@@ -19,7 +19,7 @@ import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 
 /**
- * A wiped tablet finds its own way back (1.15.1). The 2.0.x → 2.1.x move needs a wiping OTA,
+ * A wiped tablet finds its own way back (1.15.1, retries 1.15.3). The 2.0.x → 2.1.x move needs a wiping OTA,
  * and a wiped T7 used to sit on Google's setup screen with no Wi-Fi: unreachable from the MDM
  * until somebody at the venue tapped through setup.
  *
@@ -54,26 +54,47 @@ final class AutoSetup {
         return ctx.createDeviceProtectedStorageContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE);
     }
 
-    /** Saves the bootstrap networks once per wipe, and only on a device with none saved. */
+    /**
+     * Saves the bootstrap networks once per wipe, and only on a device with none saved. Runs on
+     * every service start, on user unlock and on every Wi-Fi state change (MdmService): on a
+     * wiped, offline device service starts are minutes apart, so those alone left it on setup
+     * with no network (031, 22 Oct). Every way out is logged, and nothing it throws is lost in
+     * the executor's Future.
+     */
     static void bootstrapWifi(Context ctx) {
+        try {
+            bootstrapWifiOnce(ctx);
+        } catch (Throwable t) {
+            Log.e(TAG, "bootstrap Wi-Fi failed", t);
+        }
+    }
+
+    private static void bootstrapWifiOnce(Context ctx) {
         SharedPreferences p = prefs(ctx);
         if (p.getBoolean(K_WIFI_DONE, false)) return;
         // Before unlock Wi-Fi has not loaded its saved networks yet: "none saved" would be a guess.
         UserManager um = ctx.getSystemService(UserManager.class);
-        if (um == null || !um.isUserUnlocked()) return;
+        if (um == null || !um.isUserUnlocked()) {
+            Log.i(TAG, "bootstrap Wi-Fi waits for unlock");
+            return;
+        }
         JSONObject cfg = config();
         JSONArray list = cfg == null ? null : cfg.optJSONArray("wifi");
         if (list == null || list.length() == 0) return; // firmware without a list
         WifiManager wm = (WifiManager) ctx.getSystemService(Context.WIFI_SERVICE);
-        if (wm == null) return;
+        if (wm == null) {
+            Log.w(TAG, "bootstrap Wi-Fi: no WifiManager");
+            return;
+        }
         if (!wm.isWifiEnabled()) {
-            // Wi-Fi comes up asynchronously; the networks are saved on the next start.
+            // Wi-Fi comes up asynchronously; WIFI_STATE_CHANGED brings us back here.
             Log.i(TAG, "Wi-Fi off on a device with a bootstrap list: turning it on");
             wm.setWifiEnabled(true);
             return;
         }
         if (!WifiConfig.noneSaved(ctx)) {
             // Not wiped (or set up by hand): its own networks win, the list is never merged in.
+            Log.i(TAG, "bootstrap Wi-Fi skipped: the device already has saved networks");
             p.edit().putBoolean(K_WIFI_DONE, true).apply();
             return;
         }

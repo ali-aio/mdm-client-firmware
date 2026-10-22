@@ -242,6 +242,13 @@ public class MdmService extends Service {
     // Wi-Fi disconnect tracking: edge-detect connected→disconnected and keep the last
     // hour of event timestamps (elapsedRealtime millis) so getWifiDisconnects1h() is O(n).
     private BroadcastReceiver wifiReceiver;
+    // Retries AutoSetup's bootstrap Wi-Fi on unlock and Wi-Fi state changes (a no-op once done).
+    private final BroadcastReceiver bootstrapReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            executor.submit(() -> AutoSetup.bootstrapWifi(MdmService.this));
+        }
+    };
     private volatile boolean wifiWasConnected = false;
     private final java.util.ArrayDeque<Long> wifiDisconnects = new java.util.ArrayDeque<>();
 
@@ -611,7 +618,12 @@ public class MdmService extends Service {
         executor.submit(() -> MicGain.applySavedTarget(MdmService.this));
         // A locked brightness is held again (restriction, auto off, observer).
         ScreenBrightness.restore(this);
-        // A wiped device saves the firmware's bootstrap Wi-Fi so it can reach us (AutoSetup).
+        // A wiped device saves the firmware's bootstrap Wi-Fi so it can reach us (AutoSetup):
+        // now, and again on unlock and whenever Wi-Fi changes state, since the first tries
+        // can come before unlock or before Wi-Fi is up.
+        IntentFilter bootstrapFilter = new IntentFilter(Intent.ACTION_USER_UNLOCKED);
+        bootstrapFilter.addAction(WifiManager.WIFI_STATE_CHANGED_ACTION);
+        registerReceiver(bootstrapReceiver, bootstrapFilter);
         executor.submit(() -> AutoSetup.bootstrapWifi(MdmService.this));
     }
 
@@ -4924,6 +4936,7 @@ public class MdmService extends Service {
         }
         if (wifiReceiver != null) {
             try { unregisterReceiver(wifiReceiver); } catch (Exception ignored) {}
+            try { unregisterReceiver(bootstrapReceiver); } catch (Exception ignored) {}
         }
         if (screenOnReceiver != null) {
             try { unregisterReceiver(screenOnReceiver); } catch (Exception ignored) {}
