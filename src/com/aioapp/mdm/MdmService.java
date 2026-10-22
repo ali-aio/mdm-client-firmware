@@ -420,7 +420,7 @@ public class MdmService extends Service {
         appUsageExecutor = Executors.newSingleThreadScheduledExecutor();
         appUsageExecutor.scheduleWithFixedDelay(() -> {
             try { AppUsage.report(MdmService.this, apiService, getDeviceSerial()); }
-            catch (Throwable t) { Log.w(TAG, "app usage report: " + t.getMessage()); }
+            catch (Throwable t) { Log.w(TAG, "app usage report: " + t); }
         }, 120, AppUsage.INTERVAL_MS / 1000, TimeUnit.SECONDS);
         try {
             offlineQueue = new OfflineQueue(this);

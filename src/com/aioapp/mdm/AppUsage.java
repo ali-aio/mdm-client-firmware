@@ -68,13 +68,17 @@ final class AppUsage {
         long now = System.currentTimeMillis();
         long from = p.getLong(K_LAST, now - INTERVAL_MS);
         if (from >= now || now - from > MAX_WINDOW_MS) from = Math.max(now - MAX_WINDOW_MS, Math.min(from, now - INTERVAL_MS));
-        Map<String, JSONObject> apps = new HashMap<>();
-        PackageManager pm = ctx.getPackageManager();
-        try { screenTime(ctx, from, now, apps); } catch (Exception e) { Log.w(TAG, "screen time: " + e.getMessage()); }
-        try { network(ctx, pm, from, now, apps); } catch (Exception e) { Log.w(TAG, "network: " + e.getMessage()); }
-        try { memory(ctx, apps); } catch (Exception e) { Log.w(TAG, "memory: " + e.getMessage()); }
-        try { cpu(apps); } catch (Exception e) { Log.w(TAG, "cpu: " + e.getMessage()); }
-        try { battery(ctx, pm, apps); } catch (Exception e) { Log.w(TAG, "battery: " + e.getMessage()); }
+        final long f = from, t = now;
+        final Map<String, JSONObject> apps = new java.util.concurrent.ConcurrentHashMap<>();
+        final PackageManager pm = ctx.getPackageManager();
+        Log.i(TAG, "report window " + ((t - f) / 60000) + " min");
+        // Each source on its own thread with a time limit, so one stuck system call (a dump
+        // that never closes, a stats query that blocks) cannot stall every later report.
+        step("screen time", () -> screenTime(ctx, f, t, apps));
+        step("network", () -> network(ctx, pm, f, t, apps));
+        step("memory", () -> memory(ctx, apps));
+        step("cpu", () -> cpu(apps));
+        step("battery", () -> battery(ctx, pm, apps));
         try {
             JSONArray arr = new JSONArray();
             for (Map.Entry<String, JSONObject> e : apps.entrySet()) {
@@ -92,6 +96,7 @@ final class AppUsage {
             int code = api.postAppUsage(body);
             if (code == 200) {
                 p.edit().putLong(K_LAST, now).apply();
+                Log.i(TAG, "sent " + arr.length() + " app(s)");
                 return true;
             }
             Log.w(TAG, "report refused: HTTP " + code);
@@ -101,7 +106,25 @@ final class AppUsage {
         return false;
     }
 
-    private static JSONObject app(Map<String, JSONObject> apps, String pkg) {
+    interface Step { void run() throws Exception; }
+
+    private static final java.util.concurrent.ExecutorService STEPS = java.util.concurrent.Executors.newCachedThreadPool();
+
+    private static void step(String name, Step s) {
+        java.util.concurrent.Future<?> fut = STEPS.submit(() -> { s.run(); return null; });
+        try {
+            fut.get(20, java.util.concurrent.TimeUnit.SECONDS);
+        } catch (java.util.concurrent.TimeoutException e) {
+            fut.cancel(true);
+            Log.w(TAG, name + ": timed out");
+        } catch (java.util.concurrent.ExecutionException e) {
+            Log.w(TAG, name + ": " + e.getCause());
+        } catch (Exception e) {
+            Log.w(TAG, name + ": " + e);
+        }
+    }
+
+    private static synchronized JSONObject app(Map<String, JSONObject> apps, String pkg) {
         JSONObject a = apps.get(pkg);
         if (a == null) { a = new JSONObject(); apps.put(pkg, a); }
         return a;
