@@ -64,7 +64,7 @@ final class WifiConfig {
         switch (action) {
             case "add":
                 return add(ctx, wm, ssid, p.optString("security", "wpa2"),
-                        p.optString("password", ""), p.optBoolean("hidden", false));
+                        p.optString("password", ""), p.optBoolean("hidden", false), true);
             case "remove":
                 return remove(ctx, wm, ssid);
             default:
@@ -72,8 +72,31 @@ final class WifiConfig {
         }
     }
 
+    /**
+     * Saves one network from the firmware's bootstrap list (AutoSetup). Unlike wifi_config it is
+     * not a venue network, so SelfLock does not learn it: a company SSID seen anywhere must not
+     * count as "still at the venue". Returns null on success, else why not.
+     */
+    static String addBootstrap(Context ctx, JSONObject n) {
+        WifiManager wm = wifi(ctx);
+        if (wm == null) return "no wifi";
+        String ssid = n.optString("ssid", "");
+        int len = ssid.getBytes(StandardCharsets.UTF_8).length;
+        if (len < 1 || len > 32) return "invalid ssid";
+        return add(ctx, wm, ssid, n.optString("security", "wpa2"), n.optString("password", ""),
+                n.optBoolean("hidden", false), false);
+    }
+
+    /** True when the device has no saved Wi-Fi network at all (a wiped device). */
+    static boolean noneSaved(Context ctx) {
+        WifiManager wm = wifi(ctx);
+        if (wm == null) return false;
+        List<WifiConfiguration> list = wm.getConfiguredNetworks();
+        return list == null || list.isEmpty();
+    }
+
     private static String add(Context ctx, WifiManager wm, String ssid, String security,
-                              String password, boolean hidden) {
+                              String password, boolean hidden, boolean venue) {
         if (!"open".equals(security) && !"wpa2".equals(security) && !"wpa3".equals(security)) {
             return "invalid security: " + security;
         }
@@ -113,7 +136,7 @@ final class WifiConfig {
         if (id < 0) return "the system refused the network";
         wm.enableNetwork(id, false); // allowed to join; do not leave the current network for it
         clearPending(ctx, ssid);
-        SelfLock.rememberNetwork(ctx, ssid); // a venue network: its presence means "still here"
+        if (venue) SelfLock.rememberNetwork(ctx, ssid); // its presence means "still here"
         Log.i(TAG, (existing != null ? "updated " : "added ") + ssid + " (" + security + ")");
         return null;
     }

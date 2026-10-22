@@ -611,6 +611,8 @@ public class MdmService extends Service {
         executor.submit(() -> MicGain.applySavedTarget(MdmService.this));
         // A locked brightness is held again (restriction, auto off, observer).
         ScreenBrightness.restore(this);
+        // A wiped device saves the firmware's bootstrap Wi-Fi so it can reach us (AutoSetup).
+        executor.submit(() -> AutoSetup.bootstrapWifi(MdmService.this));
     }
 
     @Override
@@ -629,6 +631,8 @@ public class MdmService extends Service {
             forceKeyframe = true;
             sendTelemetryOverWs();
         }
+        // Again on every start: the first one can come before unlock or with Wi-Fi still off.
+        executor.submit(() -> AutoSetup.bootstrapWifi(MdmService.this));
         if (networkAvailable && !polling) performCheckin();
         enforceKioskLock(); // self-heal: re-assert lock-task if it has dropped
         updateStaffPill();
@@ -950,6 +954,7 @@ public class MdmService extends Service {
                         runHttpCommands(response);
                         maybeRegisterDeviceKey();
                         serverReachable = true;
+                        AutoSetup.maybeFinish(MdmService.this); // we reach it: setup can go
                         flushOfflineQueue();
                         flushBatteryLog();
                     } else {
@@ -2809,8 +2814,11 @@ public class MdmService extends Service {
             android.hardware.display.DisplayManager dm =
                     (android.hardware.display.DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
             int dpi = getResources().getDisplayMetrics().densityDpi;
+            // SECURE (CAPTURE_SECURE_VIDEO_OUTPUT): windows marked secure, like Google's sign-in
+            // pages during setup, are mirrored too instead of showing black.
             int flags = android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR
-                    | android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC;
+                    | android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC
+                    | android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_SECURE;
             vd = dm.createVirtualDisplay("mdm-remote", w, h, dpi, surface, flags);
             if (vd == null) throw new IllegalStateException("createVirtualDisplay returned null");
 
