@@ -377,6 +377,15 @@ public final class NetScout {
         String usedLabel = "";
         Keyed used = null;
         try {
+            // The scout doing the enrol is often not the one that found the device, and has
+            // never talked to it: its first connect waits on ARP, and a radio in power-save
+            // drops those requests (22 Oct: a Mega kiosk failed enrol twice, "no route to host"
+            // then a 3 s timeout, and answered in 5 ms a minute later). Knock until it answers.
+            if (!wake(host, port)) {
+                enrollDone(out, job, false, "not answering on port " + port
+                        + " — its Wi-Fi may be asleep; try again in a minute");
+                return;
+            }
             AdbClient.Refused last = null;
             for (Keyed k : keys) {
                 try {
@@ -553,6 +562,16 @@ public final class NetScout {
     }
 
     // ── network helpers ───────────────────────────────────────────────────────────
+
+    /** Up to four patient probes a second apart: true as soon as the port answers. */
+    private static boolean wake(String host, int port) {
+        for (int i = 0; i < 4; i++) {
+            if (portOpen(host, port, PORT_PROBE_SLOW_MS)) return true;
+            Log.i(TAG, host + ":" + port + " not answering (try " + (i + 1) + " of 4)");
+            try { Thread.sleep(1000); } catch (InterruptedException e) { return false; }
+        }
+        return false;
+    }
 
     private static boolean portOpen(String host, int port) {
         return portOpen(host, port, PORT_PROBE_MS);
