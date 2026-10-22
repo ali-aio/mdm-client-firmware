@@ -199,6 +199,8 @@ public class MdmService extends Service {
     private volatile java.lang.reflect.Method screenshotMethod;
     private volatile boolean screenshotMethodResolved;
     private ScheduledExecutorService wifiScanExecutor;
+    // Per-app usage report every AppUsage.INTERVAL_MS (1.17.0).
+    private ScheduledExecutorService appUsageExecutor;
     // Lost-device reporting over Bluetooth LE (BleLost): the beacon while lost, and listening
     // for lost devices nearby while the server asks for it. Its own thread, because switching
     // Bluetooth on and scanning block for seconds.
@@ -259,7 +261,9 @@ public class MdmService extends Service {
 
     private JSONObject cachedWifiExtra = null;
     private long wifiLastMs = 0;
-    private static final long WIFI_CACHE_MS = 300_000;
+    // One minute (1.17.0): the device page's Network tab draws the signal, and a 5-minute
+    // cache made it a staircase. Reading the connection info is cheap.
+    private static final long WIFI_CACHE_MS = 60_000;
 
     private JSONArray cachedWifiScan = null;
     private static final long WIFI_SCAN_INTERVAL_SEC = 60;
@@ -413,6 +417,11 @@ public class MdmService extends Service {
         wifiScanExecutor = Executors.newSingleThreadScheduledExecutor();
         wifiScanExecutor.scheduleWithFixedDelay(this::runWifiScan, 0, WIFI_SCAN_INTERVAL_SEC, TimeUnit.SECONDS);
         apiService = new MdmApiService();
+        appUsageExecutor = Executors.newSingleThreadScheduledExecutor();
+        appUsageExecutor.scheduleWithFixedDelay(() -> {
+            try { AppUsage.report(MdmService.this, apiService, getDeviceSerial()); }
+            catch (Throwable t) { Log.w(TAG, "app usage report: " + t.getMessage()); }
+        }, 120, AppUsage.INTERVAL_MS / 1000, TimeUnit.SECONDS);
         try {
             offlineQueue = new OfflineQueue(this);
             deviceKey = new DeviceKey(this);
@@ -4347,6 +4356,7 @@ public class MdmService extends Service {
             extra.put("ip_address", cachedWifiExtra.opt("ip_address"));
             extra.put("wifi", cachedWifiExtra.opt("wifi"));
             extra.put("wifi_rssi", cachedWifiExtra.opt("wifi_rssi"));
+            copyWifiDetail(extra);
             return;
         }
         cachedWifiExtra = new JSONObject();
@@ -4367,12 +4377,27 @@ public class MdmService extends Service {
                         ip4 & 0xff, (ip4 >> 8) & 0xff, (ip4 >> 16) & 0xff, (ip4 >> 24) & 0xff));
                 cachedWifiExtra.put("wifi", info.getSSID());
                 cachedWifiExtra.put("wifi_rssi", info.getRssi());
+                // Band, link speed and access point (1.17.0): the Network tab shows them and
+                // a change of BSSID with the same SSID is roaming between access points.
+                int mhz = info.getFrequency();
+                if (mhz > 0) cachedWifiExtra.put("wifi_band", mhz >= 5925 ? "6" : mhz >= 4900 ? "5" : "2.4");
+                if (info.getLinkSpeed() > 0) cachedWifiExtra.put("wifi_link_mbps", info.getLinkSpeed());
+                String bssid = info.getBSSID();
+                if (bssid != null && !"02:00:00:00:00:00".equals(bssid)) cachedWifiExtra.put("wifi_bssid", bssid);
             }
         }
         wifiLastMs = now;
         extra.put("ip_address", cachedWifiExtra.opt("ip_address"));
         extra.put("wifi", cachedWifiExtra.opt("wifi"));
         extra.put("wifi_rssi", cachedWifiExtra.opt("wifi_rssi"));
+        copyWifiDetail(extra);
+    }
+
+    private void copyWifiDetail(JSONObject extra) throws JSONException {
+        for (String k : new String[] {"wifi_band", "wifi_link_mbps", "wifi_bssid"}) {
+            Object v = cachedWifiExtra.opt(k);
+            if (v != null) extra.put(k, v);
+        }
     }
 
     /** Non-blocking: writes the latest cached scan into the checkin extra. */
@@ -4891,6 +4916,7 @@ public class MdmService extends Service {
         if (wlcWatcher != null) wlcWatcher.shutdownNow();
         if (commandPoller != null) commandPoller.shutdownNow();
         if (wifiScanExecutor != null) wifiScanExecutor.shutdownNow();
+        if (appUsageExecutor != null) appUsageExecutor.shutdownNow();
         if (bleExecutor != null) bleExecutor.shutdownNow();
         if (wsClient != null) wsClient.stop();
         if (networkCallback != null) {

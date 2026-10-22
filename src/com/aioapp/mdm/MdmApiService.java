@@ -111,6 +111,16 @@ public class MdmApiService {
         if (r != null) r.run();
     }
 
+    /** POST /api/v1/app-usage: the per-app summary (AppUsage). The HTTP status, -1 on a network error. */
+    int postAppUsage(JSONObject body) {
+        try {
+            return doPost("/api/v1/app-usage", body.toString()).code;
+        } catch (Exception e) {
+            Log.w(TAG, "app usage failed: " + e.getMessage());
+            return -1;
+        }
+    }
+
     /** POST /api/v1/checkins/backfill: readings kept while offline. Returns the HTTP status, -1 on a network error. */
     int postBackfill(JSONObject body) {
         try {
