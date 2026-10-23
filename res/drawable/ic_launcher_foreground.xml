@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Ring and dot of the AIO mark, scaled from app-icon.svg (512) to the 72dp visible area. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="5.9"
+        android:fillColor="#00000000"
+        android:pathData="M54,34.9 a19.1,19.1 0 1 1 0,38.2 a19.1,19.1 0 1 1 0,-38.2 z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M54,47.25 a6.75,6.75 0 1 1 0,13.5 a6.75,6.75 0 1 1 0,-13.5 z" />
+</vector>

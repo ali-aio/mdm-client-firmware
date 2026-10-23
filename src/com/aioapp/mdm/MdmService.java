@@ -178,7 +178,12 @@ public class MdmService extends Service {
     private volatile MdmWebSocketClient wsClient;      // published from startWebSocket, read on many threads
     private volatile JSONArray cachedInstalledApps = null;  // invalidated from a package-change receiver thread
     private BroadcastReceiver packageChangeReceiver;
-    private String lastNotificationText = "";
+    // Status line (notifications N2, 23 Oct 2026): "Connected to AIO" / "Offline · trying
+    // again", or what a firmware update is doing while one runs. See statusLine().
+    private volatile String otaTitle = null;
+    private volatile String otaText = null;
+    private volatile long otaErrorAt = 0;
+    private String lastStatusKey = "";
     // Shown as the notification's subtext. Resolved once: the PackageManager lookup is a
     // binder call and the version cannot change while this process lives.
     private String notificationVersion = "";
@@ -442,7 +447,8 @@ public class MdmService extends Service {
         // promote to foreground FIRST, then do provisioning.
         createNotificationChannel();
         notificationVersion = clientVersionName();
-        startForeground(NOTIFICATION_ID, buildNotification("Your device is set up and protected"));
+        startForeground(NOTIFICATION_ID, buildStatus());
+        Notices.afterStart(this, UPDATES_CHANNEL_ID, notificationVersion);
         // Kiosk needs the active admin, never Device Owner — KioskManager claims and releases the
         // admin with the kiosk config itself.
         releaseDeviceOwnerIfAny();
@@ -608,7 +614,7 @@ public class MdmService extends Service {
             @Override public void onReceive(Context context, Intent intent) {
                 Log.i(TAG, "status notification dismissed — re-posting");
                 getSystemService(NotificationManager.class)
-                        .notify(NOTIFICATION_ID, buildNotification(currentStatusText()));
+                        .notify(NOTIFICATION_ID, buildStatus());
             }
         };
         registerReceiver(notifDismissReceiver, new IntentFilter(NOTIF_DISMISSED_ACTION),
@@ -897,6 +903,7 @@ public class MdmService extends Service {
             @Override
             public void onAvailable(Network network) {
                 networkAvailable = true;
+                refreshStatus();
                 Log.i(TAG, "Network available");
                 if (!remoteConfigLoaded) {
                     executor.submit(() -> {
@@ -911,6 +918,7 @@ public class MdmService extends Service {
             public void onLost(Network network) {
                 networkAvailable = false;
                 Log.i(TAG, "Network lost");
+                refreshStatus();
             }
         };
         connectivityManager.registerNetworkCallback(request, networkCallback);
@@ -918,6 +926,7 @@ public class MdmService extends Service {
         Network active = connectivityManager.getActiveNetwork();
         NetworkCapabilities caps = connectivityManager.getNetworkCapabilities(active);
         networkAvailable = caps != null && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
+        refreshStatus();
     }
 
     private void performCheckin() {
@@ -978,11 +987,13 @@ public class MdmService extends Service {
                         runHttpCommands(response);
                         maybeRegisterDeviceKey();
                         serverReachable = true;
+                        refreshStatus();
                         AutoSetup.maybeFinish(MdmService.this); // we reach it: setup can go
                         flushOfflineQueue();
                         flushBatteryLog();
                     } else {
                         serverReachable = false;
+                        refreshStatus();
                         maybeQueueOffline();
                         Log.w(TAG, "Checkin failed, reloading remote config");
                         apiService.loadRemoteConfig();
@@ -1663,17 +1674,6 @@ public class MdmService extends Service {
     /** "Updating your device… 412 MB of 1.6 GB" where the figures are known, else a
      *  percent. The same reasoning as the dashboard's: a percent that moves once per
      *  twenty megabytes looks like nothing is happening. */
-    private static String otaNotificationText(String phase, int percent) {
-        return "Updating your device… " + percent + "%";
-    }
-
-    private static String otaNotificationText(int percent, long done, long total) {
-        if (done > 0 && total > 0) {
-            return "Updating your device… " + humanMB(done) + " of " + humanMB(total);
-        }
-        return "Updating your device… " + percent + "%";
-    }
-
     private static String humanMB(long n) {
         if (n < (1L << 30)) return ((n + (1L << 19)) >> 20) + " MB";
         return String.format(java.util.Locale.US, "%.1f GB", n / (double) (1L << 30));
@@ -1684,19 +1684,20 @@ public class MdmService extends Service {
     private OtaUpdateManager.Listener buildOtaListener() {
         return new OtaUpdateManager.Listener() {
             @Override public void onDownloadProgress(String phase, int percent) {
-                updateNotificationIfNeeded("Updating your device… " + percent + "%");
+                setOtaStatus("Updating · " + percent + " %", null);
                 sendOtaProgressFrame(otaCommandId, phase, percent);
             }
             @Override public void onDownloadProgress(String phase, int percent, long done, long total) {
-                updateNotificationIfNeeded(otaNotificationText(percent, done, total));
+                setOtaStatus("Updating · " + percent + " %",
+                        done > 0 && total > 0 ? humanMB(done) + " of " + humanMB(total) : null);
                 sendOtaProgressFrame(otaCommandId, phase, percent, done, total);
             }
             @Override public void onDownloadComplete() {
-                updateNotificationIfNeeded("Almost done — installing the update…");
+                setOtaStatus("Installing the update", "Takes a few minutes");
                 reportOtaStatus(otaCommandId, "downloaded", null);
             }
             @Override public void onInstallComplete() {
-                updateNotificationIfNeeded("Update ready — your device will restart to finish");
+                setOtaStatus("Update ready", "Restarts to finish");
                 reportOtaStatus(otaCommandId, "installed", null);
                 otaCommandId = null;
             }
@@ -1707,7 +1708,7 @@ public class MdmService extends Service {
                 Log.w(TAG, "OTA " + errorCode + " on command " + id);
                 reportOtaStatus(id, "error", errorCode);
                 if (id != null && id.equals(otaCommandId)) {
-                    updateNotificationIfNeeded("Couldn't finish the update — it can be retried from the dashboard");
+                    setOtaError();
                     otaCommandId = null;
                 }
             }
@@ -1716,7 +1717,7 @@ public class MdmService extends Service {
                 // Keep the user-facing text reassuring; the raw code goes to the log + server.
                 // Failed updates wait for an operator's Retry on the dashboard; they
                 // are not re-offered on the next check-in any more.
-                updateNotificationIfNeeded("Couldn't finish the update — it can be retried from the dashboard");
+                setOtaError();
                 Log.w(TAG, "OTA error: " + errorCode);
                 reportOtaStatus(otaCommandId, "error", errorCode);
                 otaCommandId = null;
@@ -2111,7 +2112,7 @@ public class MdmService extends Service {
         wsClient = new MdmWebSocketClient(apiService.getApiBaseUrl(), serial, apiService.getApiKey());
         wsClient.setListener(this::handleWsMessage);
         // On every (re)connect the server has no baseline for us — send a full keyframe.
-        wsClient.setConnectedCallback(() -> { forceKeyframe = true; sendTelemetryOverWs(); drainPendingAcks(); serverReachable = true; flushOfflineQueue(); flushBatteryLog(); });
+        wsClient.setConnectedCallback(() -> { forceKeyframe = true; sendTelemetryOverWs(); drainPendingAcks(); serverReachable = true; refreshStatus(); flushOfflineQueue(); flushBatteryLog(); });
         wsClient.start();
         Log.i(TAG, "WebSocket client started");
     }
@@ -2298,9 +2299,9 @@ public class MdmService extends Service {
                     reportOtaStatus(cid, "error", "CANCELLED");
                     otaCommandId = null;
                     // The status notification was last set by onDownloadProgress
-                    // ("Updating your device… N%"); nothing else resets it after a
+                    // ("Updating · N %"); nothing else resets it after a
                     // cancel, so the device kept showing a stale percent.
-                    updateNotificationIfNeeded("Your device is set up and protected");
+                    clearOtaStatus();
                 }
                 break;
             }
@@ -3142,21 +3143,29 @@ public class MdmService extends Service {
      *  and written down first, because the install ends this process (see ClientUpdater). */
     private String installApk(String apkUrl, String cmdId, String serial, String[] outPkg,
                               long expectedSize, String etag, boolean selfUpdate, String sha256) {
-        // title[0] starts generic and is upgraded to the app's display label once the APK
-        // is parsed, so the on-device notification (and its final result) names the app.
-        String[] title = { "AIO MDM" };
+        // Starts as "an app" and learns the app's label, version and icon once the APK is
+        // parsed, so the on-device notification (and its final result) names the app.
+        InstallNote note = new InstallNote();
         // Distinct notification per install so concurrent installs don't overwrite each
         // other's progress (they all shared INSTALL_NOTIFICATION_ID, so the notification
         // "kept switching" between apps). Derived from cmdId → stable for this install.
         int notifId = installNotifId(cmdId);
-        String err = installApkInner(apkUrl, cmdId, serial, outPkg, expectedSize, etag, title, notifId,
+        String err = installApkInner(apkUrl, cmdId, serial, outPkg, expectedSize, etag, note, notifId,
                 selfUpdate, sha256);
         // Final result notification (dismissible; not ongoing) — reuses this install's id so
         // it replaces the progress notification in place. Keep it human; the raw error goes
         // to the log + server, not the user.
         if (!err.isEmpty()) Log.w(TAG, "APK install failed: " + err);
-        showInstallNotification(notifId, title[0], err.isEmpty() ? "Installed and ready" : "Couldn't install — we'll retry",
-                err.isEmpty() ? 100 : 0, false);
+        if (err.isEmpty()) {
+            // Android's "Updated by your admin" (only when this client is Device Owner) says
+            // less than ours does: take it down.
+            Notices.dismissAdminNoticeSoon(note.pkg);
+            android.graphics.Bitmap icon = Notices.installedIcon(this, note.pkg);
+            if (icon != null) note.icon = icon;
+            showInstallNotification(notifId, note, "done", null, 100);
+        } else {
+            showInstallNotification(notifId, note, "failed", null, 0);
+        }
         return err;
     }
 
@@ -3167,7 +3176,7 @@ public class MdmService extends Service {
     }
 
     private String installApkInner(String apkUrl, String cmdId, String serial, String[] outPkg,
-                                   long expectedSize, String etag, String[] title, int notifId,
+                                   long expectedSize, String etag, InstallNote note, int notifId,
                                    boolean selfUpdate, String sha256) {
         File apkFile = new File(getCacheDir(), "mdm_install_" + System.currentTimeMillis() + ".apk");
         try {
@@ -3179,7 +3188,7 @@ public class MdmService extends Service {
             // instead of hard-failing after a few attempts, matched to the server-side
             // stalled-install sweep so a device that never recovers gives up in step. FW-2026-000020.
             reportProgress(cmdId, serial, "downloading", expectedSize > 0 ? 0 : -1);
-            showInstallNotification(notifId, title[0], "Downloading…", expectedSize > 0 ? 0 : -1, true);
+            showInstallNotification(notifId, note, "download", "Starting…", expectedSize > 0 ? 0 : -1);
             final int[] lastPct = { -1 };       // notification: fine-grained, every 1%
             final int[] lastReported = { -1 };  // server report: throttled to 5% to avoid spam
             HttpDownloader.downloadWithResume(apkUrl, apkFile, expectedSize, etag,
@@ -3191,10 +3200,10 @@ public class MdmService extends Service {
                             // downloaded / total MB alongside the progress bar.
                             if (pct != lastPct[0] && pct < 100) {
                                 lastPct[0] = pct;
-                                double dMb = downloaded / 1048576.0, tMb = total / 1048576.0;
-                                showInstallNotification(notifId, title[0],
-                                        String.format(java.util.Locale.US, "Downloading… %.1f / %.1f MB", dMb, tMb),
-                                        pct, true);
+                                double tMb = total / 1048576.0;
+                                showInstallNotification(notifId, note, "download",
+                                        String.format(java.util.Locale.US, "%d %% of %.1f MB", pct, tMb),
+                                        pct);
                                 // Report to the server less often (every 5%) so a fast link
                                 // doesn't flood check-ins.
                                 if (pct >= lastReported[0] + 5) {
@@ -3226,7 +3235,16 @@ public class MdmService extends Service {
                     apkInfo.applicationInfo.sourceDir = apkFile.getAbsolutePath();
                     apkInfo.applicationInfo.publicSourceDir = apkFile.getAbsolutePath();
                     CharSequence lbl = apkInfo.applicationInfo.loadLabel(getPackageManager());
-                    if (lbl != null && lbl.length() > 0) title[0] = lbl.toString();
+                    if (lbl != null && lbl.length() > 0) note.name = lbl.toString();
+                    note.icon = Notices.bitmap(apkInfo.applicationInfo.loadIcon(getPackageManager()));
+                }
+                note.pkg = apkPackageName;
+                note.version = Notices.versionOf(apkInfo);
+                try {
+                    getPackageManager().getPackageInfo(apkPackageName, 0);
+                    note.replacing = true;
+                } catch (android.content.pm.PackageManager.NameNotFoundException notYet) {
+                    note.replacing = false;
                 }
                 Log.i(TAG, "APK package: " + apkPackageName);
             } else {
@@ -3251,7 +3269,7 @@ public class MdmService extends Service {
                 }
                 ClientUpdater.recordPending(this, cmdId, apkFile);
             }
-            showInstallNotification(notifId, title[0], "Installing…", -1, true);
+            showInstallNotification(notifId, note, "install", null, -1);
 
             // Install via PackageInstaller API
             PackageInstaller installer = getPackageManager().getPackageInstaller();
@@ -4831,10 +4849,55 @@ public class MdmService extends Service {
         return base;
     }
 
-    private void updateNotificationIfNeeded(String text) {
-        if (text.equals(lastNotificationText)) return;
-        lastNotificationText = text;
-        getSystemService(NotificationManager.class).notify(NOTIFICATION_ID, buildNotification(text));
+    private void setOtaStatus(String title, String text) {
+        otaTitle = title;
+        otaText = text;
+        otaErrorAt = 0;
+        refreshStatus();
+    }
+
+    /** A failed firmware update: said for an hour, then the status line goes back to normal. */
+    private void setOtaError() {
+        otaTitle = "Couldn't finish the update";
+        otaText = "It can be retried from the dashboard";
+        otaErrorAt = System.currentTimeMillis();
+        refreshStatus();
+    }
+
+    private void clearOtaStatus() {
+        otaTitle = null;
+        otaText = null;
+        otaErrorAt = 0;
+        refreshStatus();
+    }
+
+    /** {title, text} of the status line right now. */
+    private String[] statusLine() {
+        if (otaErrorAt > 0 && System.currentTimeMillis() - otaErrorAt > 60 * 60_000L) {
+            otaTitle = null;
+            otaText = null;
+            otaErrorAt = 0;
+        }
+        String venue = VenueIcon.venue(this);
+        String detail = notificationVersion.isEmpty() ? "" : "MDM " + notificationVersion;
+        if (!venue.isEmpty()) detail = detail.isEmpty() ? venue : venue + " · " + detail;
+        String title = otaTitle;
+        if (title != null) return new String[] { title, otaText != null ? otaText : detail };
+        boolean up = networkAvailable && (serverReachable || (wsClient != null && wsClient.isConnected()));
+        return new String[] { up ? "Connected to AIO" : "Offline · trying again", detail };
+    }
+
+    /** Re-posts the status line when what it says changed (connection, venue, an update). */
+    private synchronized void refreshStatus() {
+        try {
+            String[] l = statusLine();
+            String key = l[0] + "\n" + l[1];
+            if (key.equals(lastStatusKey)) return;
+            lastStatusKey = key;
+            getSystemService(NotificationManager.class).notify(NOTIFICATION_ID, buildStatus());
+        } catch (Exception e) {
+            Log.w(TAG, "refreshStatus failed: " + e.getMessage());
+        }
     }
 
     /**
@@ -4843,22 +4906,17 @@ public class MdmService extends Service {
      * (channel recreated, a restart that didn't re-enter startForeground); this makes the
      * status line self-healing on every check-in instead of only at service start.
      */
-    /** The status line the notification should be showing right now. */
-    private String currentStatusText() {
-        return lastNotificationText.isEmpty() ? "Your device is set up and protected"
-                                              : lastNotificationText;
-    }
-
     private void ensureStatusNotification() {
         try {
             NotificationManager nm = getSystemService(NotificationManager.class);
             for (android.service.notification.StatusBarNotification sbn : nm.getActiveNotifications()) {
                 if (sbn.getId() == NOTIFICATION_ID) return;
             }
-            nm.notify(NOTIFICATION_ID, buildNotification(currentStatusText()));
+            nm.notify(NOTIFICATION_ID, buildStatus());
         } catch (Exception e) {
             Log.w(TAG, "ensureStatusNotification failed: " + e.getMessage());
         }
+        refreshStatus();
     }
 
     private void createNotificationChannel() {
@@ -4877,15 +4935,14 @@ public class MdmService extends Service {
         nm.createNotificationChannel(updates);
     }
 
-    private Notification buildNotification(String text) {
-        Notification n = new Notification.Builder(this, CHANNEL_ID)
-                .setContentTitle("AIO MDM")
-                .setContentText(text)
-                // Which client build this device runs — the first thing asked in the field,
-                // and since 1.0.0 it can differ from the firmware the device shipped with.
-                .setSubText(notificationVersion.isEmpty() ? null : "v" + notificationVersion)
+    private Notification buildStatus() {
+        String[] l = statusLine();
+        Notification n = Notices.base(this, CHANNEL_ID, "Managed device")
+                .setContentTitle(l[0])
+                // The venue and which client build this device runs — the first thing asked
+                // in the field, and since 1.0.0 it can differ from the firmware it shipped with.
+                .setContentText(l[1])
                 .setShowWhen(false)
-                .setSmallIcon(R.drawable.ic_notify_shield)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
                 // Swipe → this fires → we post it straight back (see NOTIF_DISMISSED_ACTION).
@@ -4899,23 +4956,46 @@ public class MdmService extends Service {
         return n;
     }
 
+    /** What the install notice says about the app being installed (notifications N2). */
+    private static final class InstallNote {
+        String name = "";     // the app's label once the APK is read
+        String version = "";  // "2-pos (code 3)"
+        String pkg = "";
+        android.graphics.Bitmap icon;
+        boolean replacing;
+
+        String what() { return name.isEmpty() ? "an app" : name; }
+    }
+
     /**
-     * Posts/updates the app download+install progress notification (id 1002, separate from
-     * the persistent service notification). While ongoing it shows a progress bar —
-     * determinate when {@code percent >= 0}, indeterminate otherwise; the final result is
-     * posted with {@code ongoing=false} so the user can dismiss it. Thread-safe.
+     * Posts/updates an install's notice (one id per install, separate from the status line).
+     * [phase] download / install show progress (determinate when {@code percent >= 0});
+     * done / failed are the result, dismissible, and clear themselves after a while.
      */
-    private void showInstallNotification(int notifId, String title, String text, int percent, boolean ongoing) {
-        Notification.Builder b = new Notification.Builder(this, UPDATES_CHANNEL_ID)
-                .setContentTitle(title != null && !title.isEmpty() ? title : "AIO MDM")
-                .setContentText(text)
-                .setSmallIcon(ongoing ? R.drawable.ic_notify_download
-                                      : R.drawable.ic_notify_done)
+    private void showInstallNotification(int notifId, InstallNote a, String phase, String text, int percent) {
+        Notification.Builder b = Notices.base(this, UPDATES_CHANNEL_ID, "Updates")
+                .setGroup(Notices.GROUP_UPDATES)
                 .setOnlyAlertOnce(true)
-                .setOngoing(ongoing);
-        if (ongoing) {
-            if (percent >= 0) b.setProgress(100, percent, false);
-            else b.setProgress(0, 0, true); // indeterminate (installing / unknown size)
+                .setLargeIcon(a.icon);
+        switch (phase) {
+            case "download":
+            case "install":
+                b.setContentTitle(("download".equals(phase) ? "Downloading " : "Installing ") + a.what())
+                        .setContentText(text != null ? text : a.version)
+                        .setOngoing(true)
+                        .setSilent(true);
+                if (percent >= 0) b.setProgress(100, percent, false);
+                else b.setProgress(0, 0, true); // indeterminate (installing / unknown size)
+                break;
+            case "done":
+                b.setContentTitle(a.what() + (a.replacing ? " updated" : " installed"))
+                        .setContentText(a.version.isEmpty() ? "Ready" : a.version + " · ready")
+                        .setTimeoutAfter(Notices.DONE_TIMEOUT_MS);
+                break;
+            default:
+                b.setContentTitle("Couldn't install " + a.what())
+                        .setContentText("We'll try again")
+                        .setTimeoutAfter(Notices.FAILED_TIMEOUT_MS);
         }
         getSystemService(NotificationManager.class).notify(notifId, b.build());
     }
