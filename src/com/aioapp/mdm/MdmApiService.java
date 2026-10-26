@@ -518,6 +518,32 @@ public class MdmApiService {
     }
 
     private PostResult doPost(String endpoint, String jsonBody, String key) throws Exception {
+        return doPost(endpoint, jsonBody, key, 30_000);
+    }
+
+    /** A device-API answer for Save to library: the parsed body, or why it failed ("HTTP 409: …"). */
+    static final class Answer {
+        final JSONObject body; final String error;
+        Answer(JSONObject body, String error) { this.body = body; this.error = error; }
+    }
+
+    /** POST a JSON body and keep the server's error message on a refusal (pull_apk, 1.21.0). */
+    Answer postForAnswer(String endpoint, JSONObject payload, int readTimeoutMs) {
+        try {
+            String key = apiKey;
+            PostResult r = doPost(endpoint, payload.toString(), key, readTimeoutMs);
+            JSONObject json = null;
+            try { json = r.body == null || r.body.isEmpty() ? new JSONObject() : new JSONObject(r.body); }
+            catch (Exception ignored) {}
+            if (r.code >= 200 && r.code < 300) return new Answer(json != null ? json : new JSONObject(), "");
+            String why = json != null ? json.optString("error", "") : "";
+            return new Answer(null, "HTTP " + r.code + (why.isEmpty() ? "" : ": " + why));
+        } catch (Exception e) {
+            return new Answer(null, e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName());
+        }
+    }
+
+    private PostResult doPost(String endpoint, String jsonBody, String key, int readTimeoutMs) throws Exception {
         URL url = new URL(apiBaseUrl + endpoint);
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
         conn.setRequestMethod("POST");
@@ -525,7 +551,7 @@ public class MdmApiService {
         conn.setRequestProperty("X-API-Key", key);
         conn.setDoOutput(true);
         conn.setConnectTimeout(10_000);
-        conn.setReadTimeout(30_000);
+        conn.setReadTimeout(readTimeoutMs);
         byte[] payload = jsonBody.getBytes(StandardCharsets.UTF_8);
         // Gzip only payloads big enough to win (check-ins); tiny bodies (acks) would
         // grow. The server inflates Content-Encoding: gzip transparently.

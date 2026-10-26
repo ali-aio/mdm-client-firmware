@@ -2574,6 +2574,34 @@ public class MdmService extends Service {
                 sendTelemetryOverWs();
                 break;
             }
+            case "pull_apk": {
+                // Save to library (1.21.0): upload an installed app's APK (ApkPuller). Runs
+                // on this heavy thread for as long as the upload takes; repeats of the same
+                // command are already dropped by handleIncomingCommand. A progress ack every
+                // 10 s whatever the upload does, so the server sees it is alive.
+                final String pkg = payload.optString("package", "");
+                final java.util.concurrent.atomic.AtomicInteger pct = new java.util.concurrent.atomic.AtomicInteger(0);
+                final String cid = cmdId, sn = serialNumber;
+                reportProgress(cid, sn, "running", 0);
+                java.util.concurrent.ScheduledExecutorService beat =
+                        java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
+                beat.scheduleAtFixedRate(() -> reportProgress(cid, sn, "running", pct.get()),
+                        10, 10, TimeUnit.SECONDS);
+                ApkPuller.Result res;
+                try {
+                    final int[] last = {-1};
+                    res = ApkPuller.pull(this, apiService, sn, cid, pkg, p -> {
+                        pct.set(p);
+                        // Every 5 %: enough to move the dashboard's bar without flooding the socket.
+                        if (p - last[0] >= 5 || p == 100) { last[0] = p; reportProgress(cid, sn, "running", p); }
+                    });
+                } finally {
+                    beat.shutdownNow();
+                }
+                Log.i(TAG, "pull_apk " + pkg + ": " + (res.ok ? "ok" : "failed") + " — " + res.message);
+                reportTerminal(cid, sn, res.ok ? "completed" : "failed", res.message);
+                break;
+            }
             case "wifi_config": {
                 if ("export".equals(payload.optString("action", ""))) {
                     // Saved networks with passwords, sealed to a key off the server (1.20.0).
@@ -3590,6 +3618,8 @@ public class MdmService extends Service {
         // This client runs lost_mode and wifi_config (1.12.0+). Flags for the same reason.
         extra.put("lost_mode_cmd", true);
         extra.put("wifi_config_cmd", true);
+        // This client runs pull_apk, Save to library (1.21.0). A flag for the same reason.
+        extra.put("apk_pull_cmd", true);
         // Lost mode as it stands on the device, and the saved Wi-Fi networks (no passwords).
         extra.put("lost_mode", LostMode.report(MdmService.this));
         // Lost-device reporting over Bluetooth LE (1.13.0): what the hardware can do, the
