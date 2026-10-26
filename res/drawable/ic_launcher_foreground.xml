@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Ring and dot of the AIO mark, scaled from app-icon.svg (512) to the 72dp visible area. -->
+<!-- The shield with the AIO dot (I1, picked 26 Oct 2026), white on the gradient background,
+     inside the adaptive icon's 72dp visible area. Also the themed (monochrome) layer. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
@@ -7,10 +8,11 @@
     android:viewportHeight="108">
     <path
         android:strokeColor="#FFFFFFFF"
-        android:strokeWidth="5.9"
+        android:strokeWidth="5"
+        android:strokeLineJoin="round"
         android:fillColor="#00000000"
-        android:pathData="M54,34.9 a19.1,19.1 0 1 1 0,38.2 a19.1,19.1 0 1 1 0,-38.2 z" />
+        android:pathData="M54,31.5 L73,38.5 V52 c0,12.5 -8,21 -19,25.5 C43,73 35,64.5 35,52 V38.5 Z" />
     <path
         android:fillColor="#FFFFFFFF"
-        android:pathData="M54,47.25 a6.75,6.75 0 1 1 0,13.5 a6.75,6.75 0 1 1 0,-13.5 z" />
+        android:pathData="M54,46.5 a6.5,6.5 0 1 1 0,13 a6.5,6.5 0 1 1 0,-13 z" />
 </vector>
