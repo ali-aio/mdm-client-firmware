@@ -7,6 +7,7 @@ import android.net.wifi.WifiConfiguration;
 import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
 import android.os.SystemClock;
+import android.util.Base64;
 import android.util.Log;
 
 import org.json.JSONArray;
@@ -14,7 +15,19 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.nio.charset.StandardCharsets;
+import java.security.KeyFactory;
+import java.security.PublicKey;
+import java.security.SecureRandom;
+import java.security.spec.MGF1ParameterSpec;
+import java.security.spec.X509EncodedKeySpec;
 import java.util.List;
+
+import javax.crypto.Cipher;
+import javax.crypto.KeyGenerator;
+import javax.crypto.SecretKey;
+import javax.crypto.spec.GCMParameterSpec;
+import javax.crypto.spec.OAEPParameterSpec;
+import javax.crypto.spec.PSource;
 
 /**
  * The {@code wifi_config} command: add or update a saved Wi-Fi network, or forget one, without
@@ -30,7 +43,9 @@ import java.util.List;
  * do not connect within two minutes the old ones go back, and it tries again ten minutes
  * later. Every other add/update/remove is applied at once.
  *
- * Passwords are never reported: {@link #networks} lists SSID, security and state only.
+ * Passwords are never reported in the clear: {@link #networks} lists SSID, security and state
+ * only, and {@link #export} (wifi_config "export", 1.20.0) seals them to a key the server does
+ * not hold.
  */
 final class WifiConfig {
     private static final String TAG = "WifiConfig";
@@ -44,6 +59,20 @@ final class WifiConfig {
     private static final long OFFLINE_BEFORE_SWITCH_MS = 60_000L;
     private static final long TRY_MS = 120_000L;
     private static final long RETRY_AFTER_FAIL_MS = 10 * 60_000L;
+
+    /**
+     * RSA-3072 public key (X.509 DER, base64) that wifi_config "export" seals to. The private
+     * half is kept off the MDM server (~/.config/aio-mdm/wifi-export.key on the firmware PC),
+     * so the stored command output is unreadable there.
+     */
+    private static final String EXPORT_KEY = ""
+            + "MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEAz5NpgBoFJJ+lNDG288GYOYp+4w0vQ8DpqvK9CfA7U2cn"
+            + "YinXg0mDhjnMEfSaaHwlsz9dUFA5ETLDO6p9AQUWYtbz3oxVRrkCwoMS7z+6U6RAjfAim5bdv0niYUdZZRu134T6"
+            + "fYpCRfItkmwSgeini5QaT6fGmxS9ASbgKUFtwG9VyyF5SHw17o14eTozBWzW/+AHGdUoqZbLzKoKBm1HE/d07k7n"
+            + "abc3LawNbI6UyJoTAvRA0cp4AN8YWYrzg8Ldo6ElL4IkdKi27orj4bsDiSPN5z/rgvA5jKymRJkTJRFNFlAoNgiK"
+            + "sn0jB0RwbdkMSyKUm8OCFeVts0eq9W6oHzgp4wbVT4XHODIuKagATkewSLvlyAjOWQm2H5T/TQsm4fzcP/uABwkg"
+            + "agxsX1gpYUp8gUaOZ/za9MAPZ80xmILg4Utig0jZWxmKmfPX8SRYdKPls/aDmTIp9HylWaS84RptH7ulOt/jDoM6"
+            + "4G45x7Ga07xBvYRsshub5mDV2/ghAgMBAAE=";
 
     private static long disconnectedSinceMs; // elapsedRealtime; 0 while connected
 
@@ -314,6 +343,63 @@ final class WifiConfig {
             Log.w(TAG, "networks: " + e.getMessage());
             return null;
         }
+    }
+
+    /**
+     * wifi_config "export": every saved network with its password, for the firmware's bootstrap
+     * list (first_boot.json). The JSON is sealed with a fresh AES-256-GCM key, which is wrapped
+     * with {@link #EXPORT_KEY} (RSA-OAEP, SHA-256/MGF1-SHA-256). Only the count is in the clear.
+     * A key that is not a quoted passphrase (a 64-hex PSK) is sent as "psk".
+     */
+    static JSONObject export(Context ctx, String serial) throws Exception {
+        WifiManager wm = wifi(ctx);
+        if (wm == null) throw new IllegalStateException("no wifi");
+        List<WifiConfiguration> list = wm.getPrivilegedConfiguredNetworks();
+        if (list == null) throw new IllegalStateException("networks unreadable");
+        String connected = connectedSsid(wm);
+        JSONArray nets = new JSONArray();
+        for (WifiConfiguration c : list) {
+            String ssid = unquote(c.SSID);
+            if (ssid == null || ssid.isEmpty()) continue;
+            JSONObject o = new JSONObject();
+            o.put("ssid", ssid);
+            o.put("security", securityOf(c));
+            o.put("hidden", c.hiddenSSID);
+            o.put("connected", ssid.equals(connected));
+            String k = c.preSharedKey;
+            if (k != null && !k.isEmpty() && !"*".equals(k)) {
+                if (k.length() >= 2 && k.startsWith("\"") && k.endsWith("\"")) o.put("password", unquote(k));
+                else o.put("psk", k);
+            }
+            nets.put(o);
+        }
+        JSONObject plain = new JSONObject()
+                .put("serial", serial)
+                .put("at", System.currentTimeMillis())
+                .put("networks", nets);
+
+        KeyGenerator kg = KeyGenerator.getInstance("AES");
+        kg.init(256);
+        SecretKey aes = kg.generateKey();
+        byte[] iv = new byte[12];
+        new SecureRandom().nextBytes(iv);
+        Cipher gcm = Cipher.getInstance("AES/GCM/NoPadding");
+        gcm.init(Cipher.ENCRYPT_MODE, aes, new GCMParameterSpec(128, iv));
+        byte[] data = gcm.doFinal(plain.toString().getBytes(StandardCharsets.UTF_8));
+
+        PublicKey pub = KeyFactory.getInstance("RSA").generatePublic(
+                new X509EncodedKeySpec(Base64.decode(EXPORT_KEY, Base64.NO_WRAP)));
+        Cipher rsa = Cipher.getInstance("RSA/ECB/OAEPPadding");
+        rsa.init(Cipher.ENCRYPT_MODE, pub, new OAEPParameterSpec("SHA-256", "MGF1",
+                MGF1ParameterSpec.SHA256, PSource.PSpecified.DEFAULT));
+        byte[] wrapped = rsa.doFinal(aes.getEncoded());
+
+        return new JSONObject()
+                .put("enc", "rsa-oaep-sha256+aes-256-gcm")
+                .put("count", nets.length())
+                .put("key", Base64.encodeToString(wrapped, Base64.NO_WRAP))
+                .put("iv", Base64.encodeToString(iv, Base64.NO_WRAP))
+                .put("data", Base64.encodeToString(data, Base64.NO_WRAP));
     }
 
     // ── helpers ─────────────────────────────────────────────────────────────────

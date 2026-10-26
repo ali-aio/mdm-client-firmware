@@ -2575,6 +2575,19 @@ public class MdmService extends Service {
                 break;
             }
             case "wifi_config": {
+                if ("export".equals(payload.optString("action", ""))) {
+                    // Saved networks with passwords, sealed to a key off the server (1.20.0).
+                    try {
+                        JSONObject res = WifiConfig.export(this, serialNumber);
+                        Log.i(TAG, "wifi export: " + res.optInt("count") + " network(s)");
+                        reportTerminal(cmdId, serialNumber, "completed", res.toString());
+                    } catch (Exception e) {
+                        Log.e(TAG, "wifi export: " + e);
+                        reportTerminal(cmdId, serialNumber, "failed",
+                                new JSONObject().put("error", String.valueOf(e.getMessage())).toString());
+                    }
+                    break;
+                }
                 if ("connect".equals(payload.optString("action", ""))) {
                     // Switch networks, reversibly (WifiConfig.connect, 1.18.0): up to 90 s on
                     // its own thread; the result is acked once the device is back online.
