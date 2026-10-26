@@ -3176,6 +3176,10 @@ public class MdmService extends Service {
             android.graphics.Bitmap icon = Notices.installedIcon(this, note.pkg);
             if (icon != null) note.icon = icon;
             showInstallNotification(notifId, note, "done", null, 100);
+        } else if (ClientUpdater.notNewer(err)) {
+            // Already on this build (an update that arrived after another one landed it):
+            // nothing failed, so take the progress notice down instead of "Couldn't install".
+            getSystemService(NotificationManager.class).cancel(notifId);
         } else {
             showInstallNotification(notifId, note, "failed", null, 0);
         }
