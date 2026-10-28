@@ -170,7 +170,9 @@ public class UnlockActivity extends Activity {
         col.setOrientation(LinearLayout.VERTICAL);
         col.setGravity(land ? Gravity.START : Gravity.CENTER_HORIZONTAL);
         col.setPadding(dp(land ? 48 : 28), dp(land ? 40 : 30), dp(land ? 40 : 28), dp(land ? 32 : 4));
-        col.addView(venueRow());
+        LinearLayout venue = (LinearLayout) venueRow();
+        if (!land) venue.setGravity(Gravity.CENTER); // centred over the stacked text
+        col.addView(venue);
         if (land) col.addView(new View(this), new LinearLayout.LayoutParams(1, 0, 1f));
 
         TextView kicker = label("STAFF UNLOCK", C_KICKER, 12, FONT_MEDIUM);
