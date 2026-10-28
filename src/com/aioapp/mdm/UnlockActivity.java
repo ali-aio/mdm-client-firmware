@@ -23,15 +23,18 @@ import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import android.widget.FrameLayout;
+import android.content.res.Configuration;
+import android.graphics.drawable.StateListDrawable;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
 /**
- * The staff PIN pad that takes a tablet out of lock mode, with no server connection needed:
- * full screen (A2, picked 20 Oct 2026), the venue's logo and name on top, "Staff only · Enter
- * the venue PIN", dots that fill as digits go in, round 74 dp keys with a coral unlock key
- * next to 0. A right PIN shows "Staff mode on" for a moment, then the tablet leaves lock task
+ * The staff PIN pad that takes a tablet out of lock mode, with no server connection needed.
+ * U1 · Split (picked 28 Oct 2026, the same design as the Standard client's): on a landscape
+ * screen the venue, "Staff unlock", what happens and the device on the left, the keypad on the
+ * right; on a portrait screen the two stack. Dots fill as digits go in, round keys sized to the
+ * screen, a coral unlock key next to 0, a white ring on the key a D-pad is on. A right PIN shows "Staff mode on" for a moment, then the tablet leaves lock task
  * and {@link StaffPill} stays up until someone goes back to guest mode.
  *
  * Opened by the firmware's corner + Power gesture (MdmService.onKioskExitRequested). Never
@@ -49,7 +52,7 @@ public class UnlockActivity extends Activity {
     private static final int C_BG = Color.parseColor("#1B1530");
     private static final int C_TEXT = Color.WHITE;
     private static final int C_KICKER = Color.parseColor("#FFB199");
-    private static final int C_KEY = Color.argb(26, 255, 255, 255);
+    private static final int C_KEY = Color.argb(20, 255, 255, 255);
     private static final int C_KEY_LINE = Color.argb(36, 255, 255, 255);
     private static final int C_CORAL = Color.parseColor("#F9674E");
     private static final int C_CORAL_OFF = Color.argb(72, 249, 103, 78);
@@ -110,8 +113,13 @@ public class UnlockActivity extends Activity {
 
     private View root(LinearLayout column) {
         FrameLayout root = new FrameLayout(this);
-        root.setBackground(new GradientDrawable(GradientDrawable.Orientation.TL_BR,
-                new int[] {C_BG_TOP, C_BG}));
+        GradientDrawable bg = new GradientDrawable();
+        bg.setGradientType(GradientDrawable.RADIAL_GRADIENT);
+        bg.setColors(new int[] {Color.parseColor("#2C2350"), Color.parseColor("#161227"), Color.parseColor("#0F0C1C")});
+        bg.setGradientCenter(0f, 0f);
+        bg.setGradientRadius(Math.max(getResources().getDisplayMetrics().widthPixels,
+                getResources().getDisplayMetrics().heightPixels) * 1.15f);
+        root.setBackground(bg);
         root.addView(column, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         final int top = column.getPaddingTop(), bottom = column.getPaddingBottom();
@@ -133,44 +141,115 @@ public class UnlockActivity extends Activity {
         return col;
     }
 
+    private boolean landscape() {
+        return getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE;
+    }
+
     private View buildView() {
-        LinearLayout col = column();
+        boolean land = landscape();
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(land ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
+        LinearLayout info = infoPanel(land), keys = keypadPanel(land);
+        if (land) {
+            row.addView(info, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f));
+            View rule = new View(this);
+            rule.setBackgroundColor(Color.argb(18, 255, 255, 255));
+            row.addView(rule, new LinearLayout.LayoutParams(dp(1), LinearLayout.LayoutParams.MATCH_PARENT));
+            row.addView(keys, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f));
+        } else {
+            row.addView(info, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+            row.addView(keys, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        }
+        updateEntry();
+        return root(row);
+    }
 
-        TextView kicker = label("STAFF ONLY", C_KICKER, 12, FONT_MEDIUM);
-        kicker.setLetterSpacing(0.12f);
-        kicker.setCompoundDrawablePadding(dp(6));
-        col.addView(kicker, topMargin(dp(28)));
-        col.addView(label("Enter the venue PIN", C_TEXT, 27, FONT_MEDIUM), topMargin(dp(6)));
+    /** The venue, what this screen is, what happens, and (landscape) which device. */
+    private LinearLayout infoPanel(boolean land) {
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        col.setGravity(land ? Gravity.START : Gravity.CENTER_HORIZONTAL);
+        col.setPadding(dp(land ? 48 : 28), dp(land ? 40 : 30), dp(land ? 40 : 28), dp(land ? 32 : 4));
+        col.addView(venueRow());
+        if (land) col.addView(new View(this), new LinearLayout.LayoutParams(1, 0, 1f));
 
+        TextView kicker = label("STAFF UNLOCK", C_KICKER, 12, FONT_MEDIUM);
+        kicker.setLetterSpacing(0.14f);
+        col.addView(kicker, startMargin(land, dp(land ? 0 : 26)));
+        TextView title = label(land ? "Enter the\nvenue PIN" : "Enter the venue PIN", C_TEXT, land ? 34 : 27, FONT_MEDIUM);
+        if (land) title.setGravity(Gravity.START);
+        title.setLineSpacing(0, 1.05f);
+        col.addView(title, startMargin(land, dp(6)));
+        TextView sub = label(land ? "The device leaves guest mode until you switch it back. Your manager has the PIN."
+                : "Leaves guest mode until you switch it back.", C_TEXT, 15, FONT);
+        sub.setAlpha(0.62f);
+        sub.setMaxWidth(dp(340));
+        sub.setLineSpacing(0, 1.2f);
+        if (land) sub.setGravity(Gravity.START);
+        col.addView(sub, startMargin(land, dp(10)));
+        String serial = SystemPropertiesProxy.get("ro.serialno", "");
+        if (land && !serial.isEmpty()) {
+            TextView s = label(serial, C_TEXT, 11, FONT);
+            s.setAlpha(0.4f);
+            s.setLetterSpacing(0.04f);
+            col.addView(s, startMargin(true, dp(20)));
+        }
+        return col;
+    }
+
+    private LinearLayout keypadPanel(boolean land) {
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        col.setGravity(Gravity.CENTER);
+        col.setPadding(dp(16), dp(16), dp(16), dp(16));
         dots = new Dots(this);
-        col.addView(dots, sized(LinearLayout.LayoutParams.MATCH_PARENT, dp(16), dp(20)));
-
+        col.addView(dots, sized(LinearLayout.LayoutParams.MATCH_PARENT, dp(18), 0));
         status = label("", C_ERR, 13, FONT);
-        LinearLayout.LayoutParams sLp = topMargin(dp(10));
         status.setMinHeight(dp(18));
-        col.addView(status, sLp);
-
-        View spacer = new View(this);
-        col.addView(spacer, new LinearLayout.LayoutParams(1, 0, 1f));
-
-        col.addView(buildKeypad());
+        col.addView(status, topMargin(dp(10)));
+        col.addView(buildKeypad(land), topMargin(dp(8)));
 
         TextView cancel = label("Cancel", C_TEXT, 16, FONT_MEDIUM);
+        cancel.setAlpha(0.75f);
         cancel.setPadding(dp(20), dp(8), dp(20), dp(8));
+        cancel.setBackground(focusRing(Color.TRANSPARENT, true));
         cancel.setFocusable(true);
         cancel.setClickable(true);
         cancel.setOnClickListener(v -> finish());
-        col.addView(cancel, topMargin(dp(16)));
-
+        col.addView(cancel, topMargin(dp(12)));
         String serial = SystemPropertiesProxy.get("ro.serialno", "");
-        if (!serial.isEmpty()) {
+        if (!land && !serial.isEmpty()) {
             TextView s = label(serial, C_TEXT, 10, FONT);
             s.setAlpha(0.45f);
             s.setLetterSpacing(0.04f);
             col.addView(s, topMargin(dp(4)));
         }
-        updateEntry();
-        return root(col);
+        return col;
+    }
+
+    private LinearLayout.LayoutParams startMargin(boolean land, int top) {
+        LinearLayout.LayoutParams lp = topMargin(top);
+        lp.gravity = land ? Gravity.START : Gravity.CENTER_HORIZONTAL;
+        return lp;
+    }
+
+    /** A key's background: its fill, and a white ring while a D-pad is on it. */
+    private StateListDrawable focusRing(int fill, boolean pill) {
+        StateListDrawable d = new StateListDrawable();
+        GradientDrawable ring = new GradientDrawable();
+        GradientDrawable plain = new GradientDrawable();
+        for (GradientDrawable g : new GradientDrawable[] {ring, plain}) {
+            if (pill) g.setCornerRadius(dp(20)); else g.setShape(GradientDrawable.OVAL);
+            g.setColor(fill);
+        }
+        ring.setStroke(dp(3), Color.WHITE);
+        GradientDrawable down = new GradientDrawable();
+        if (pill) down.setCornerRadius(dp(20)); else down.setShape(GradientDrawable.OVAL);
+        down.setColor(Color.argb(48, 255, 255, 255));
+        d.addState(new int[] {android.R.attr.state_pressed}, down);
+        d.addState(new int[] {android.R.attr.state_focused}, ring);
+        d.addState(new int[] {}, plain);
+        return d;
     }
 
     /** The venue's logo (or the AIO tile) and its name: whose PIN this wants. */
@@ -215,7 +294,11 @@ public class UnlockActivity extends Activity {
     }
 
     /** 3x4 grid of round keys: 1-9, then backspace / 0 / unlock. */
-    private View buildKeypad() {
+    private View buildKeypad(boolean land) {
+        // Four rows, the dots, the message and Cancel must fit the panel's height.
+        int hDp = getResources().getConfiguration().screenHeightDp;
+        int fit = (land ? hDp - 230 : (hDp - 330) * 2 / 3) / 4 - 14;
+        int size = dp(Math.max(56, Math.min(fit, land ? 80 : 96)));
         LinearLayout pad = new LinearLayout(this);
         pad.setOrientation(LinearLayout.VERTICAL);
         String[][] rows = {{"1", "2", "3"}, {"4", "5", "6"}, {"7", "8", "9"}, {"del", "0", "ok"}};
@@ -226,7 +309,9 @@ public class UnlockActivity extends Activity {
                 final String k = rows[r][c];
                 View key;
                 if ("del".equals(k)) {
-                    TextView t = label("⌫", C_TEXT, 26, FONT);
+                    TextView t = label("Del", C_TEXT, 17, FONT);
+                    t.setAlpha(0.8f);
+                    t.setBackground(focusRing(Color.TRANSPARENT, false));
                     t.setContentDescription("Delete");
                     key = t;
                     key.setOnClickListener(v -> {
@@ -245,7 +330,7 @@ public class UnlockActivity extends Activity {
                     unlockBtn = key;
                 } else {
                     TextView t = label(k, C_TEXT, 30, FONT);
-                    t.setBackground(round(C_KEY, C_KEY_LINE));
+                    t.setBackground(focusRing(C_KEY, false));
                     key = t;
                     key.setOnClickListener(v -> {
                         if (entry.length() < MAX_LEN) entry.append(k);
@@ -255,13 +340,13 @@ public class UnlockActivity extends Activity {
                 }
                 key.setClickable(true);
                 key.setFocusable(true); // so a remote / D-pad can drive the keypad
-                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(74), dp(74));
-                if (c > 0) lp.leftMargin = dp(32);
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(size, size);
+                if (c > 0) lp.leftMargin = dp(26);
                 line.addView(key, lp);
             }
             LinearLayout.LayoutParams lineLp = new LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-            if (r > 0) lineLp.topMargin = dp(12);
+            if (r > 0) lineLp.topMargin = dp(14);
             lineLp.gravity = Gravity.CENTER_HORIZONTAL;
             pad.addView(line, lineLp);
         }
@@ -442,6 +527,11 @@ public class UnlockActivity extends Activity {
 
         UnlockKey(Context ctx) { super(ctx); }
 
+        @Override protected void onFocusChanged(boolean gained, int direction, android.graphics.Rect previous) {
+            super.onFocusChanged(gained, direction, previous);
+            invalidate(); // draw or drop the D-pad ring
+        }
+
         @Override protected void onDraw(Canvas c) {
             float w = getWidth(), h = getHeight(), cx = w / 2f, cy = h / 2f;
             boolean on = isEnabled();
@@ -464,6 +554,12 @@ public class UnlockActivity extends Activity {
             c.drawRoundRect(new RectF(cx - bw / 2f, bt, cx + bw / 2f, bt + bh), dpf(3), dpf(3), paint);
             paint.setColor(on ? C_CORAL : C_BG);
             c.drawCircle(cx, bt + bh * 0.45f, dpf(2), paint);
+            if (isFocused()) { // the D-pad is on it
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setStrokeWidth(dpf(3));
+                paint.setColor(Color.WHITE);
+                c.drawCircle(cx, cy, Math.min(w, h) / 2f - dpf(1.5f), paint);
+            }
         }
     }
 }
