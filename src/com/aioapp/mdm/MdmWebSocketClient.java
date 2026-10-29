@@ -24,6 +24,11 @@ public class MdmWebSocketClient {
     private static final long[] BACKOFF_MS = {1_000, 2_000, 4_000, 8_000, 30_000};
     // Reset backoff if connected for this long without dropping
     private static final long BACKOFF_RESET_MS = 60_000;
+    // A close with 1012 (service restart) is a deploy: the other server copy is still up, so
+    // the fleet spreads its reconnect over this window instead of landing in one second.
+    private static final long RESTART_SPREAD_MS = 30_000;
+    // Set by the read loop when the server's close frame said 1012; read once by connectLoop.
+    private volatile boolean serverRestarting = false;
     // Hard cap on an inbound frame's declared length before we allocate for it. Server->device
     // frames are JSON commands + small capture-control messages; 8 MB is far more than enough.
     // Without this, a 127-length frame declaring a huge/negative size would OutOfMemoryError a
@@ -133,6 +138,10 @@ public class MdmWebSocketClient {
             // the lockstep so reconnects fan out across the window.
             long base = BACKOFF_MS[Math.min(reconnectAttempt, BACKOFF_MS.length - 1)];
             long delay = base / 2 + (long) secureRandom.nextInt((int) (base / 2) + 1);
+            if (serverRestarting) {
+                serverRestarting = false;
+                delay = (long) secureRandom.nextInt((int) RESTART_SPREAD_MS + 1);
+            }
             Log.i(TAG, "Reconnecting in " + (delay / 1000) + "s (attempt " + (reconnectAttempt + 1) + ")");
             reconnectAttempt++;
             try {
@@ -292,9 +301,12 @@ public class MdmWebSocketClient {
                     break;
                 case 0xA: // pong — response to our ping, connection confirmed alive
                     break;
-                case 0x8: // close
-                    Log.i(TAG, "Server closed the WebSocket");
+                case 0x8: { // close
+                    int code = payload.length >= 2 ? ((payload[0] & 0xFF) << 8) | (payload[1] & 0xFF) : 0;
+                    serverRestarting = code == 1012;
+                    Log.i(TAG, "Server closed the WebSocket (" + code + ")");
                     return; // exit connect() so connectLoop() can reconnect
+                }
             }
         }
     }
