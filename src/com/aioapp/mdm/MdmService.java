@@ -947,6 +947,11 @@ public class MdmService extends Service {
             } else {
                 sendTelemetryOverWs();
             }
+        } else if (wsClient != null && wsClient.isStuckDialing()) {
+            // Alive but stuck inside a dial (a TLS handshake that lost the network used to
+            // block with no timeout): the loop never gets to retry, so start a fresh client.
+            Log.w(TAG, "WS dial hung — restarting the WebSocket client");
+            executor.submit(this::restartWebSocket);
         } else if (wsClient != null && !wsClient.isLoopAlive()) {
             // The reconnect loop is gone but this object is still here, so startWebSocket()
             // would return early and the device would hold no socket for the rest of its

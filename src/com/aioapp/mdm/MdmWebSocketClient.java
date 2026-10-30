@@ -61,6 +61,13 @@ public class MdmWebSocketClient {
     private volatile OutputStream outputStream;
     private volatile int reconnectAttempt = 0;   // read by the watchdog thread + loop thread
     private volatile long connectedAt = 0;       // non-atomic 64-bit read across threads without volatile
+    // When the current dial started (0 when connected or idle). A dial that never finishes is
+    // the one failure the loop can't see from inside: MdmService restarts the client when this
+    // gets old (isStuckDialing).
+    private volatile long dialStartedAt = 0;
+    // A dial (TCP connect + TLS handshake + upgrade response) gets this long before it is
+    // treated as hung.
+    private static final long DIAL_TIMEOUT_MS = 20_000;
 
     // Connection health tracking
     private volatile long lastDataReceivedAt = 0;
@@ -167,10 +174,28 @@ public class MdmWebSocketClient {
         return t != null && t.isAlive();
     }
 
+    /**
+     * Whether a dial has been going for far longer than any dial can take: the loop is alive
+     * but stuck inside connect(), which nothing else notices (isConnected() is false, the
+     * loop thread is alive). MdmService restarts the client when this says so.
+     */
+    public boolean isStuckDialing() {
+        long t = dialStartedAt;
+        return t != 0 && !isConnected() && System.currentTimeMillis() - t > 3 * DIAL_TIMEOUT_MS;
+    }
+
     private void connect() throws Exception {
+        dialStartedAt = System.currentTimeMillis();
         Socket s;
         if (useTls) {
             SSLSocket ssl = (SSLSocket) SSLSocketFactory.getDefault().createSocket();
+            // Published before the dial so closeSocket()/forceReconnect() can abort it, and a
+            // read timeout before the handshake: startHandshake() used to run with none, so a
+            // network that dropped mid-handshake left this thread blocked for good while the
+            // device carried on over HTTP. 16 AIO PK T7s on 1.22.2 sat like that from a Wi-Fi
+            // blip at 03:10 UTC on 30 Oct 2026, every command riding the minute poll.
+            this.socket = ssl;
+            ssl.setSoTimeout((int) DIAL_TIMEOUT_MS);
             // Force HTTP/1.1 via ALPN — WebSocket upgrade is incompatible with h2,
             // and ALB negotiates h2 by default when the client offers it.
             if (android.os.Build.VERSION.SDK_INT >= 29) {
@@ -195,9 +220,10 @@ public class MdmWebSocketClient {
             s = ssl;
         } else {
             s = new Socket();
+            this.socket = s;
+            s.setSoTimeout((int) DIAL_TIMEOUT_MS);
             s.connect(new InetSocketAddress(host, port), 10_000);
         }
-        s.setSoTimeout(90_000); // > 2× server ping interval (45s)
         this.socket = s;
         OutputStream out = s.getOutputStream();
         this.outputStream = out;
@@ -241,6 +267,8 @@ public class MdmWebSocketClient {
         if (!header.toString().contains(" 101 ")) {
             throw new IOException("WebSocket upgrade failed: " + header.toString().split("\r\n")[0]);
         }
+        s.setSoTimeout(90_000); // > 2× server ping interval (45s), once the dial is done
+        dialStartedAt = 0;
 
         Log.i(TAG, "WebSocket connected to " + host + ":" + port);
         connectCount++;
