@@ -3272,18 +3272,32 @@ public class MdmService extends Service {
             // Download done → now installing.
             reportProgress(cmdId, serial, "installing", -1);
 
+            // A split APK bundle (.xapk and the like, 1.22.4): every part goes into the one
+            // session below; its base answers for the name, label and icon.
+            List<String> bundleParts;
+            try {
+                bundleParts = selfUpdate ? null : ApkBundle.parts(apkFile);
+            } catch (ApkBundle.NotInstallable e) {
+                apkFile.delete();
+                return e.getMessage();
+            }
+            File inspect = apkFile;
+            if (bundleParts != null) {
+                inspect = new File(getCacheDir(), "mdm_bundle_base_" + System.currentTimeMillis() + ".apk");
+                ApkBundle.extract(apkFile, bundleParts.get(0), inspect);
+            }
             // Extract package name (+ display label) from the APK for fallback verification,
             // a clearer error, and the user-facing notification title.
             String apkPackageName = null;
             android.content.pm.PackageInfo apkInfo = getPackageManager().getPackageArchiveInfo(
-                    apkFile.getAbsolutePath(), 0);
+                    inspect.getAbsolutePath(), 0);
             if (apkInfo != null) {
                 apkPackageName = apkInfo.packageName;
                 if (outPkg != null) outPkg[0] = apkPackageName; // report to server on ack
                 // Load the human-readable app label (needs sourceDir set for an uninstalled APK).
                 if (apkInfo.applicationInfo != null) {
-                    apkInfo.applicationInfo.sourceDir = apkFile.getAbsolutePath();
-                    apkInfo.applicationInfo.publicSourceDir = apkFile.getAbsolutePath();
+                    apkInfo.applicationInfo.sourceDir = inspect.getAbsolutePath();
+                    apkInfo.applicationInfo.publicSourceDir = inspect.getAbsolutePath();
                     CharSequence lbl = apkInfo.applicationInfo.loadLabel(getPackageManager());
                     if (lbl != null && lbl.length() > 0) note.name = lbl.toString();
                     note.icon = Notices.bitmap(apkInfo.applicationInfo.loadIcon(getPackageManager()));
@@ -3306,8 +3320,10 @@ public class MdmService extends Service {
                 Log.e(TAG, "APK could not be parsed (corrupt/truncated download): " + apkUrl
                         + " (" + written + " bytes)");
                 apkFile.delete();
+                if (inspect != apkFile) inspect.delete();
                 return "download appears corrupt (unparseable APK, " + written + " bytes) — will retry";
             }
+            if (inspect != apkFile) inspect.delete(); // the base copy was only read for the notice
             // A new build of this client: prove it is one before handing it to the installer,
             // and write down the intent — committing the session ends this process, so the
             // ack has to come from the version that replaces us.
@@ -3363,12 +3379,26 @@ public class MdmService extends Service {
             try {
                 int sessionId = installer.createSession(params);
                 try (PackageInstaller.Session session = installer.openSession(sessionId)) {
-                    try (InputStream in = new java.io.FileInputStream(apkFile);
-                         OutputStream out = session.openWrite("base.apk", 0, apkFile.length())) {
-                        byte[] buf = new byte[8192];
-                        int n;
-                        while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
-                        session.fsync(out);
+                    if (bundleParts == null) {
+                        try (InputStream in = new java.io.FileInputStream(apkFile);
+                             OutputStream out = session.openWrite("base.apk", 0, apkFile.length())) {
+                            byte[] buf = new byte[8192];
+                            int n;
+                            while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
+                            session.fsync(out);
+                        }
+                    } else {
+                        try (java.util.zip.ZipFile zip = new java.util.zip.ZipFile(apkFile)) {
+                            byte[] buf = new byte[65536];
+                            for (String part : bundleParts) {
+                                try (InputStream in = zip.getInputStream(zip.getEntry(part));
+                                     OutputStream out = session.openWrite(part, 0, ApkBundle.sizeOf(zip, part))) {
+                                    int n;
+                                    while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
+                                    session.fsync(out);
+                                }
+                            }
+                        }
                     }
                     PendingIntent pi = PendingIntent.getBroadcast(this, sessionId,
                             new Intent(action).setPackage(getPackageName()), PendingIntent.FLAG_IMMUTABLE);
@@ -3625,6 +3655,8 @@ public class MdmService extends Service {
         extra.put("wifi_config_cmd", true);
         // This client runs pull_apk, Save to library (1.21.0). A flag for the same reason.
         extra.put("apk_pull_cmd", true);
+        // Split APK bundles (.xapk): every part in one session (1.22.4).
+        extra.put("apk_bundle_cmd", true);
         // Lost mode as it stands on the device, and the saved Wi-Fi networks (no passwords).
         extra.put("lost_mode", LostMode.report(MdmService.this));
         // Lost-device reporting over Bluetooth LE (1.13.0): what the hardware can do, the
