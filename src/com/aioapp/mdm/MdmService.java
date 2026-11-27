@@ -387,6 +387,10 @@ public class MdmService extends Service {
 
     // Connection health
     private static final long HTTP_SAFETY_NET_MS = 5 * 60_000L;
+    /** The HTTP check-in while the socket is healthy (1.22.7, was 5 min): the socket carries
+     *  telemetry and commands; the server's device-traffic counts showed the 5-minute
+     *  check-in and command poll as two thirds of all requests. */
+    private static final long HTTP_SAFETY_NET_WS_MS = 15 * 60_000L;
     private static final long STALE_WS_THRESHOLD_SECS = 120;
     private volatile long lastHttpCheckinAt = 0;
 
@@ -855,7 +859,7 @@ public class MdmService extends Service {
         // wakeup alarm only needs to fire at the HTTP safety-net cadence — this drops the
         // ~9/10 Doze wakeups that previously only re-sent a WS telemetry frame.
         if (!powered && wsHealthy) {
-            intervalMs = Math.max(intervalMs, HTTP_SAFETY_NET_MS);
+            intervalMs = Math.max(intervalMs, HTTP_SAFETY_NET_WS_MS);
         }
 
         // Add up to +20% jitter so ~900 devices that boot / restore power / reconnect together
@@ -972,13 +976,16 @@ public class MdmService extends Service {
             Log.w(TAG, "No WebSocket client but the network is up — starting it");
             executor.submit(this::startWebSocket);
         }
-        // HTTP safety net: always checkin via HTTP every 5 minutes regardless of WS state.
+        // HTTP safety net: a check-in every 15 minutes with a healthy socket, every 5 without.
         // Command delivery is NOT this schedule's job — telemetry cadence and command
         // latency are different problems, and making check-ins minutely to carry commands
         // would multiply the fleet's telemetry writes by five to fix a delivery bug. The
         // response still carries any pending command it happens to find (runHttpCommands),
         // which is a free backup; the minute-by-minute command poll is its own loop.
-        if ((now - lastHttpCheckinAt) >= HTTP_SAFETY_NET_MS) {
+        boolean wsOk = wsClient != null && wsClient.isConnected()
+                && wsClient.getSecsSinceLastData() <= STALE_WS_THRESHOLD_SECS;
+        long safetyNet = wsOk ? HTTP_SAFETY_NET_WS_MS : HTTP_SAFETY_NET_MS;
+        if ((now - lastHttpCheckinAt) >= safetyNet) {
             lastHttpCheckinAt = now;
             executor.submit(() -> {
                 polling = true;
@@ -995,6 +1002,9 @@ public class MdmService extends Service {
                         JSONObject config = response.optJSONObject("config");
                         if (config != null) applyConfig(config);
                         runHttpCommands(response);
+                        // The check-in carried the queued commands: it counts as a poll, so
+                        // the floor poll does not ask again (1.22.7).
+                        lastCommandPollAt = SystemClock.elapsedRealtime();
                         maybeRegisterDeviceKey();
                         serverReachable = true;
                         refreshStatus();
@@ -1121,7 +1131,7 @@ public class MdmService extends Service {
     /** Command poll cadence while there is no usable socket. See startCommandPoller. */
     private static final long COMMAND_POLL_MS = 60_000L;
     /** Poll at least this often even with a healthy socket — see the floor check below. */
-    private static final long COMMAND_POLL_FLOOR_MS = 5 * 60_000L;
+    private static final long COMMAND_POLL_FLOOR_MS = HTTP_SAFETY_NET_WS_MS; // 15 min since 1.22.7 (was 5)
     private volatile long lastCommandPollAt = 0L;
     private ScheduledExecutorService commandPoller;
     /** Set by a server "wake" frame (and after a terminal ack) to poll on the next tick. */
