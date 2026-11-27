@@ -204,8 +204,6 @@ public class MdmService extends Service {
     private volatile java.lang.reflect.Method screenshotMethod;
     private volatile boolean screenshotMethodResolved;
     private ScheduledExecutorService wifiScanExecutor;
-    // Per-app usage report every AppUsage.INTERVAL_MS (1.17.0).
-    private ScheduledExecutorService appUsageExecutor;
     // Lost-device reporting over Bluetooth LE (BleLost): the beacon while lost, and listening
     // for lost devices nearby while the server asks for it. Its own thread, because switching
     // Bluetooth on and scanning block for seconds.
@@ -422,11 +420,10 @@ public class MdmService extends Service {
         wifiScanExecutor = Executors.newSingleThreadScheduledExecutor();
         wifiScanExecutor.scheduleWithFixedDelay(this::runWifiScan, 0, WIFI_SCAN_INTERVAL_SEC, TimeUnit.SECONDS);
         apiService = new MdmApiService();
-        appUsageExecutor = Executors.newSingleThreadScheduledExecutor();
-        appUsageExecutor.scheduleWithFixedDelay(() -> {
-            try { AppUsage.report(MdmService.this, apiService, getDeviceSerial()); }
-            catch (Throwable t) { Log.w(TAG, "app usage report: " + t); }
-        }, 120, AppUsage.INTERVAL_MS / 1000, TimeUnit.SECONDS);
+        // App usage reports ended in 1.22.6 (the server stopped keeping them on 26 Nov 2026):
+        // drop what the old report stored.
+        try { createDeviceProtectedStorageContext().deleteSharedPreferences("app_usage"); }
+        catch (Throwable t) { Log.w(TAG, "app usage prefs: " + t); }
         try {
             offlineQueue = new OfflineQueue(this);
             deviceKey = new DeviceKey(this);
@@ -5133,7 +5130,6 @@ public class MdmService extends Service {
         if (wlcWatcher != null) wlcWatcher.shutdownNow();
         if (commandPoller != null) commandPoller.shutdownNow();
         if (wifiScanExecutor != null) wifiScanExecutor.shutdownNow();
-        if (appUsageExecutor != null) appUsageExecutor.shutdownNow();
         if (bleExecutor != null) bleExecutor.shutdownNow();
         if (wsClient != null) wsClient.stop();
         if (networkCallback != null) {
